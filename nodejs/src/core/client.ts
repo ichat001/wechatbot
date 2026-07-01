@@ -415,6 +415,11 @@ export class WeChatBot extends TypedEmitter<BotEventMap> {
       this.poller.loadCursor(),
     ])
 
+    // Tell the server we're coming online (non-fatal)
+    await this.api.notifyStart(creds.baseUrl, creds.token).catch((error) => {
+      this.logger.warn(`notifyStart failed (ignored): ${error instanceof Error ? error.message : String(error)}`)
+    })
+
     this.emit('poll:start')
     this.runPromise = this.poller.start(creds.baseUrl, creds.token)
 
@@ -422,6 +427,12 @@ export class WeChatBot extends TypedEmitter<BotEventMap> {
       await this.runPromise
     } finally {
       this.runPromise = null
+      // Tell the server we're going offline (non-fatal).
+      // Credentials may have rotated after a mid-poll re-login, so re-read them.
+      const current = this.credentials ?? creds
+      await this.api.notifyStop(current.baseUrl, current.token).catch((error) => {
+        this.logger.warn(`notifyStop failed (ignored): ${error instanceof Error ? error.message : String(error)}`)
+      })
       this.emit('poll:stop')
     }
   }

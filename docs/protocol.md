@@ -62,6 +62,19 @@ POST /ilink/bot/sendtyping
 Body: { ilink_user_id: "<id>", typing_ticket: "<ticket>", status: 1|2, base_info: {...} }
 ```
 
+## Connection Status Notify
+```
+POST /ilink/bot/msg/notifystart
+Body: { base_info: {...} }
+→ { ret: 0 }
+
+POST /ilink/bot/msg/notifystop
+Body: { base_info: {...} }
+→ { ret: 0 }
+```
+Sent when the bot client starts / stops polling so the server can track per-account
+online state. Failures are non-fatal — log and continue.
+
 ## Media Upload
 ```
 POST /ilink/bot/getuploadurl

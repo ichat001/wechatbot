@@ -108,6 +108,26 @@ export class ILinkApi {
     )
   }
 
+  // ── Lifecycle ─────────────────────────────────────────────────────────
+
+  async notifyStart(baseUrl: string, token: string): Promise<Record<string, unknown>> {
+    return this.http.apiPost<Record<string, unknown>>(
+      baseUrl,
+      '/ilink/bot/msg/notifystart',
+      { base_info: baseInfo() },
+      buildAuthHeaders(token),
+    )
+  }
+
+  async notifyStop(baseUrl: string, token: string): Promise<Record<string, unknown>> {
+    return this.http.apiPost<Record<string, unknown>>(
+      baseUrl,
+      '/ilink/bot/msg/notifystop',
+      { base_info: baseInfo() },
+      buildAuthHeaders(token),
+    )
+  }
+
   // ── Media ─────────────────────────────────────────────────────────────
 
   async getUploadUrl(

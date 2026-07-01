@@ -296,6 +296,15 @@ impl WeChatBot {
     /// Start the long-poll loop. Blocks until stopped.
     pub async fn run(&self) -> Result<()> {
         *self.stopped.write().await = false;
+
+        // Tell the server we're coming online (non-fatal)
+        {
+            let (base_url, token) = self.get_auth().await?;
+            if let Err(e) = self.client.notify_start(&base_url, &token).await {
+                warn!("notify_start failed (ignored): {}", e);
+            }
+        }
+
         info!("Long-poll loop started");
         let mut retry_delay = Duration::from_secs(1);
 
@@ -339,6 +348,14 @@ impl WeChatBot {
                     retry_delay = std::cmp::min(retry_delay * 2, Duration::from_secs(10));
                     continue;
                 }
+            }
+        }
+
+        // Tell the server we're going offline (non-fatal).
+        // Credentials may have rotated after a mid-poll re-login, so re-read them.
+        if let Ok((base_url, token)) = self.get_auth().await {
+            if let Err(e) = self.client.notify_stop(&base_url, &token).await {
+                warn!("notify_stop failed (ignored): {}", e);
             }
         }
 
