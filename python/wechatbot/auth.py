@@ -57,6 +57,17 @@ async def clear_credentials(path: Path | None = None) -> None:
     target.unlink(missing_ok=True)
 
 
+async def _read_verify_code(is_retry: bool) -> str:
+    """Default pairing-code prompt: read a line from stdin."""
+    prompt = (
+        "Code mismatch — enter the pairing code shown in WeChat again: "
+        if is_retry
+        else "Enter the pairing code shown in WeChat on your phone: "
+    )
+    code = await asyncio.to_thread(input, prompt)
+    return code.strip()
+
+
 async def login(
     api: ILinkApi,
     *,
@@ -66,12 +77,16 @@ async def login(
     on_qr_url: Callable[[str], None] | None = None,
     on_scanned: Callable[[], None] | None = None,
     on_expired: Callable[[], None] | None = None,
+    on_verify_code: Callable[[bool], str] | None = None,
 ) -> Credentials:
     """QR code login. Returns stored credentials if available and force=False."""
-    if not force:
-        stored = await load_credentials(cred_path)
-        if stored:
-            return stored
+    stored = await load_credentials(cred_path)
+    if not force and stored:
+        return stored
+
+    # Send known local tokens so the server can answer binded_redirect
+    # instead of issuing a duplicate session for an already-bound bot.
+    local_token_list = [stored.token] if stored and stored.token else []
 
     qr_refresh_count = 0
     while True:
@@ -81,7 +96,7 @@ async def login(
                 f"QR code expired {MAX_QR_REFRESH_COUNT} times — login aborted"
             )
 
-        qr = await api.get_qr_code(FIXED_QR_BASE_URL)
+        qr = await api.get_qr_code(FIXED_QR_BASE_URL, local_token_list)
         qr_url = qr["qrcode_img_content"]
 
         if on_qr_url:
@@ -91,13 +106,19 @@ async def login(
 
         last_status = ""
         current_poll_base_url = FIXED_QR_BASE_URL
+        # Pairing code awaiting server verification (pair-code login flow)
+        pending_verify_code: str | None = None
         while True:
-            status = await api.poll_qr_status(current_poll_base_url, qr["qrcode"])
+            status = await api.poll_qr_status(
+                current_poll_base_url, qr["qrcode"], pending_verify_code
+            )
             current = status["status"]
 
             if current != last_status:
                 last_status = current
                 if current == "scaned":
+                    # A pending pairing code that leads back to scaned was accepted
+                    pending_verify_code = None
                     if on_scanned:
                         on_scanned()
                     else:
@@ -128,6 +149,38 @@ async def login(
                 )
                 await save_credentials(creds, cred_path)
                 return creds
+
+            # Pair-code challenge: ask the user for the digits shown in WeChat
+            if current == "need_verifycode":
+                is_retry = pending_verify_code is not None
+                if on_verify_code:
+                    pending_verify_code = on_verify_code(is_retry)
+                else:
+                    pending_verify_code = await _read_verify_code(is_retry)
+                continue  # Re-poll immediately with the code attached
+
+            # Too many wrong pairing codes: server blocked this QR — get a new one
+            if current == "verify_code_blocked":
+                print(
+                    "[wechatbot] Pairing code blocked after repeated mismatches "
+                    "— requesting new QR",
+                    file=sys.stderr,
+                )
+                pending_verify_code = None
+                break  # Outer loop requests a new QR (counts toward refresh limit)
+
+            # Already bound to this client: reuse existing local credentials
+            if current == "binded_redirect":
+                if stored:
+                    print(
+                        "[wechatbot] Bot already bound — reusing stored credentials",
+                        file=sys.stderr,
+                    )
+                    return stored
+                raise AuthError(
+                    "Server reports this bot is already bound to this client "
+                    "(binded_redirect), but no local credentials were found"
+                )
 
             # Handle IDC redirect
             if current == "scaned_but_redirect":

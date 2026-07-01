@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import struct
 from importlib.metadata import version as pkg_version
 from typing import Any
@@ -67,8 +68,32 @@ def auth_headers(token: str) -> dict[str, str]:
     }
 
 
-def _base_info() -> dict[str, str]:
-    return {"channel_version": CHANNEL_VERSION}
+# Default bot_agent when none is configured or the configured value is invalid.
+DEFAULT_BOT_AGENT = f"WeChatBot/{CHANNEL_VERSION}"
+
+# Maximum length (bytes) of the sanitized bot_agent string.
+_BOT_AGENT_MAX_LEN = 256
+
+# UA-style grammar (matches openclaw-weixin):
+#   bot_agent = product *( SP product )
+#   product   = name "/" version [ SP "(" comment ")" ]
+_PRODUCT = r"[A-Za-z0-9_.\-]{1,32}/[A-Za-z0-9_.+\-]{1,32}(?: \([\x20-\x27\x2A-\x7E]{1,64}\))?"
+_BOT_AGENT_RE = re.compile(rf"^{_PRODUCT}(?: {_PRODUCT})*$")
+
+
+def sanitize_bot_agent(raw: str | None) -> str:
+    """Validate a user-supplied bot_agent into a wire-safe string.
+
+    Unlike upstream openclaw-weixin (which salvages the valid tokens out of a
+    partially invalid string), any invalid input falls back to
+    DEFAULT_BOT_AGENT wholesale — simpler and just as safe on the wire.
+    """
+    if not raw:
+        return DEFAULT_BOT_AGENT
+    normalized = " ".join(raw.split())
+    if not normalized or len(normalized.encode("utf-8")) > _BOT_AGENT_MAX_LEN:
+        return DEFAULT_BOT_AGENT
+    return normalized if _BOT_AGENT_RE.match(normalized) else DEFAULT_BOT_AGENT
 
 
 async def _parse_response(resp: aiohttp.ClientResponse, label: str) -> dict[str, Any]:
@@ -97,17 +122,41 @@ async def _parse_response(resp: aiohttp.ClientResponse, label: str) -> dict[str,
 class ILinkApi:
     """Low-level iLink API client. Each method maps 1:1 to an endpoint."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, bot_agent: str | None = None) -> None:
         self._timeout = aiohttp.ClientTimeout(total=45)
+        self._bot_agent = sanitize_bot_agent(bot_agent)
 
-    async def get_qr_code(self, base_url: str) -> dict[str, Any]:
+    def _base_info(self) -> dict[str, str]:
+        return {"channel_version": CHANNEL_VERSION, "bot_agent": self._bot_agent}
+
+    async def get_qr_code(
+        self, base_url: str, local_token_list: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Request a login QR code.
+
+        local_token_list carries up to 10 known local bot tokens (newest
+        first) so the server can answer binded_redirect for an already-bound
+        bot instead of issuing a duplicate session.
+        """
         url = f"{base_url}/ilink/bot/get_bot_qrcode?bot_type=3"
+        body = {"local_token_list": local_token_list or []}
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=_common_headers()) as resp:
+            async with session.post(
+                url, headers=_common_headers(), json=body
+            ) as resp:
                 return await _parse_response(resp, "get_bot_qrcode")
 
-    async def poll_qr_status(self, base_url: str, qrcode: str) -> dict[str, Any]:
+    async def poll_qr_status(
+        self, base_url: str, qrcode: str, verify_code: str | None = None
+    ) -> dict[str, Any]:
+        """Poll the QR scan status.
+
+        verify_code submits a pairing code after the server answered
+        need_verifycode (the digits shown in WeChat on the user's phone).
+        """
         url = f"{base_url}/ilink/bot/get_qrcode_status?qrcode={quote(qrcode, safe='')}"
+        if verify_code:
+            url += f"&verify_code={quote(verify_code, safe='')}"
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 url, headers=_common_headers()
@@ -117,13 +166,13 @@ class ILinkApi:
     async def get_updates(
         self, base_url: str, token: str, cursor: str
     ) -> dict[str, Any]:
-        body = {"get_updates_buf": cursor, "base_info": _base_info()}
+        body = {"get_updates_buf": cursor, "base_info": self._base_info()}
         return await self._post(base_url, "/ilink/bot/getupdates", token, body, 45)
 
     async def send_message(
         self, base_url: str, token: str, msg: dict[str, Any]
     ) -> dict[str, Any]:
-        body = {"msg": msg, "base_info": _base_info()}
+        body = {"msg": msg, "base_info": self._base_info()}
         return await self._post(base_url, "/ilink/bot/sendmessage", token, body)
 
     async def get_config(
@@ -132,7 +181,7 @@ class ILinkApi:
         body = {
             "ilink_user_id": user_id,
             "context_token": context_token,
-            "base_info": _base_info(),
+            "base_info": self._base_info(),
         }
         return await self._post(base_url, "/ilink/bot/getconfig", token, body)
 
@@ -148,18 +197,18 @@ class ILinkApi:
             "ilink_user_id": user_id,
             "typing_ticket": ticket,
             "status": status,
-            "base_info": _base_info(),
+            "base_info": self._base_info(),
         }
         return await self._post(base_url, "/ilink/bot/sendtyping", token, body)
 
     async def notify_start(self, base_url: str, token: str) -> dict[str, Any]:
         """Notify the server that this client is starting (coming online)."""
-        body = {"base_info": _base_info()}
+        body = {"base_info": self._base_info()}
         return await self._post(base_url, "/ilink/bot/msg/notifystart", token, body)
 
     async def notify_stop(self, base_url: str, token: str) -> dict[str, Any]:
         """Notify the server that this client is stopping (going offline)."""
-        body = {"base_info": _base_info()}
+        body = {"base_info": self._base_info()}
         return await self._post(base_url, "/ilink/bot/msg/notifystop", token, body)
 
     @staticmethod
@@ -217,7 +266,7 @@ class ILinkApi:
             "filesize": filesize,
             "no_need_thumb": no_need_thumb,
             "aeskey": aeskey,
-            "base_info": _base_info(),
+            "base_info": self._base_info(),
         }
         return await self._post(base_url, "/ilink/bot/getuploadurl", token, body)
 

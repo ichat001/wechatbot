@@ -12,9 +12,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
-
 )
 
 const (
@@ -69,13 +70,41 @@ func AuthHeaders(token string) http.Header {
 	return h
 }
 
-func baseInfo() map[string]string {
-	return map[string]string{"channel_version": ChannelVersion}
+// DefaultBotAgent is used when no bot_agent is configured or the configured
+// value is invalid.
+const DefaultBotAgent = "WeChatBot/" + ChannelVersion
+
+// Maximum length (bytes) of the sanitized bot_agent string.
+const botAgentMaxLen = 256
+
+// UA-style grammar (matches openclaw-weixin):
+//
+//	bot_agent = product *( SP product )
+//	product   = name "/" version [ SP "(" comment ")" ]
+var botAgentRe = regexp.MustCompile(
+	`^[A-Za-z0-9_.\-]{1,32}/[A-Za-z0-9_.+\-]{1,32}( \([\x20-\x27\x2A-\x7E]{1,64}\))?` +
+		`( [A-Za-z0-9_.\-]{1,32}/[A-Za-z0-9_.+\-]{1,32}( \([\x20-\x27\x2A-\x7E]{1,64}\))?)*$`,
+)
+
+// SanitizeBotAgent validates a user-supplied bot_agent into a wire-safe string.
+//
+// Unlike upstream openclaw-weixin (which salvages the valid tokens out of a
+// partially invalid string), any invalid input falls back to DefaultBotAgent
+// wholesale — simpler and just as safe on the wire.
+func SanitizeBotAgent(raw string) string {
+	normalized := strings.Join(strings.Fields(raw), " ")
+	if normalized == "" || len(normalized) > botAgentMaxLen || !botAgentRe.MatchString(normalized) {
+		return DefaultBotAgent
+	}
+	return normalized
 }
 
 // Client wraps HTTP calls to the iLink API.
 type Client struct {
 	HTTP *http.Client
+	// BotAgent identifies the app driving this bot; sent as base_info.bot_agent.
+	// Empty means DefaultBotAgent.
+	BotAgent string
 }
 
 // NewClient creates a protocol client with sensible defaults.
@@ -83,6 +112,14 @@ func NewClient() *Client {
 	return &Client{
 		HTTP: &http.Client{Timeout: 45 * time.Second},
 	}
+}
+
+func (c *Client) baseInfo() map[string]string {
+	agent := c.BotAgent
+	if agent == "" {
+		agent = DefaultBotAgent
+	}
+	return map[string]string{"channel_version": ChannelVersion, "bot_agent": agent}
 }
 
 // QRCodeResponse from get_bot_qrcode.
@@ -93,7 +130,7 @@ type QRCodeResponse struct {
 
 // QRStatusResponse from get_qrcode_status.
 type QRStatusResponse struct {
-	Status       string `json:"status"` // wait, scaned, confirmed, expired, scaned_but_redirect
+	Status       string `json:"status"` // wait, scaned, confirmed, expired, scaned_but_redirect, binded_redirect, need_verifycode, verify_code_blocked
 	BotToken     string `json:"bot_token,omitempty"`
 	BotID        string `json:"ilink_bot_id,omitempty"`
 	UserID       string `json:"ilink_user_id,omitempty"`
@@ -117,12 +154,21 @@ type GetConfigResponse struct {
 }
 
 // GetQRCode requests a new QR code for login.
-func (c *Client) GetQRCode(ctx context.Context, baseURL string) (*QRCodeResponse, error) {
+//
+// localTokenList carries up to 10 known local bot tokens (newest first) so
+// the server can answer binded_redirect for an already-bound bot instead of
+// issuing a duplicate session.
+func (c *Client) GetQRCode(ctx context.Context, baseURL string, localTokenList []string) (*QRCodeResponse, error) {
+	if localTokenList == nil {
+		localTokenList = []string{}
+	}
+	body, _ := json.Marshal(map[string]interface{}{"local_token_list": localTokenList})
 	u := baseURL + "/ilink/bot/get_bot_qrcode?bot_type=3"
-	req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
+	req, _ := http.NewRequestWithContext(ctx, "POST", u, bytes.NewReader(body))
 	for k, v := range CommonHeaders() {
 		req.Header[k] = v
 	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("get_bot_qrcode: %w", err)
@@ -136,8 +182,14 @@ func (c *Client) GetQRCode(ctx context.Context, baseURL string) (*QRCodeResponse
 }
 
 // PollQRStatus polls the QR code scan status.
-func (c *Client) PollQRStatus(ctx context.Context, baseURL, qrcode string) (*QRStatusResponse, error) {
+//
+// verifyCode submits a pairing code after the server answered need_verifycode
+// (the digits shown in WeChat on the user's phone). Pass "" when none.
+func (c *Client) PollQRStatus(ctx context.Context, baseURL, qrcode, verifyCode string) (*QRStatusResponse, error) {
 	u := baseURL + "/ilink/bot/get_qrcode_status?qrcode=" + url.QueryEscape(qrcode)
+	if verifyCode != "" {
+		u += "&verify_code=" + url.QueryEscape(verifyCode)
+	}
 	req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
 	for k, v := range CommonHeaders() {
 		req.Header[k] = v
@@ -201,7 +253,7 @@ func (c *Client) apiPost(ctx context.Context, baseURL, endpoint, token string, b
 func (c *Client) GetUpdates(ctx context.Context, baseURL, token, cursor string) (*GetUpdatesResponse, error) {
 	body := map[string]interface{}{
 		"get_updates_buf": cursor,
-		"base_info":       baseInfo(),
+		"base_info":       c.baseInfo(),
 	}
 	raw, err := c.apiPost(ctx, baseURL, "/ilink/bot/getupdates", token, body, 45*time.Second)
 	if err != nil {
@@ -216,7 +268,7 @@ func (c *Client) GetUpdates(ctx context.Context, baseURL, token, cursor string) 
 func (c *Client) SendMessage(ctx context.Context, baseURL, token string, msg interface{}) error {
 	body := map[string]interface{}{
 		"msg":       msg,
-		"base_info": baseInfo(),
+		"base_info": c.baseInfo(),
 	}
 	_, err := c.apiPost(ctx, baseURL, "/ilink/bot/sendmessage", token, body, 15*time.Second)
 	return err
@@ -227,7 +279,7 @@ func (c *Client) GetConfig(ctx context.Context, baseURL, token, userID, contextT
 	body := map[string]interface{}{
 		"ilink_user_id": userID,
 		"context_token": contextToken,
-		"base_info":     baseInfo(),
+		"base_info":     c.baseInfo(),
 	}
 	raw, err := c.apiPost(ctx, baseURL, "/ilink/bot/getconfig", token, body, 15*time.Second)
 	if err != nil {
@@ -244,7 +296,7 @@ func (c *Client) SendTyping(ctx context.Context, baseURL, token, userID, ticket 
 		"ilink_user_id":  userID,
 		"typing_ticket":  ticket,
 		"status":         status,
-		"base_info":      baseInfo(),
+		"base_info":      c.baseInfo(),
 	}
 	_, err := c.apiPost(ctx, baseURL, "/ilink/bot/sendtyping", token, body, 15*time.Second)
 	return err
@@ -252,14 +304,14 @@ func (c *Client) SendTyping(ctx context.Context, baseURL, token, userID, ticket 
 
 // NotifyStart notifies the server that this client is starting (coming online).
 func (c *Client) NotifyStart(ctx context.Context, baseURL, token string) error {
-	body := map[string]interface{}{"base_info": baseInfo()}
+	body := map[string]interface{}{"base_info": c.baseInfo()}
 	_, err := c.apiPost(ctx, baseURL, "/ilink/bot/msg/notifystart", token, body, 15*time.Second)
 	return err
 }
 
 // NotifyStop notifies the server that this client is stopping (going offline).
 func (c *Client) NotifyStop(ctx context.Context, baseURL, token string) error {
-	body := map[string]interface{}{"base_info": baseInfo()}
+	body := map[string]interface{}{"base_info": c.baseInfo()}
 	_, err := c.apiPost(ctx, baseURL, "/ilink/bot/msg/notifystop", token, body, 15*time.Second)
 	return err
 }
@@ -298,7 +350,7 @@ func (c *Client) GetUploadURL(ctx context.Context, baseURL, token string, req Ge
 		"filesize":       req.FileSize,
 		"no_need_thumb":  req.NoNeedThumb,
 		"aeskey":         req.AESKey,
-		"base_info":      baseInfo(),
+		"base_info":      c.baseInfo(),
 	}
 	raw, err := c.apiPost(ctx, baseURL, "/ilink/bot/getuploadurl", token, body, 15*time.Second)
 	if err != nil {

@@ -7,16 +7,29 @@ CDN URL: `https://novac2c.cdn.weixin.qq.com/c2c`
 
 ### Step 1: Get QR Code
 ```
-GET /ilink/bot/get_bot_qrcode?bot_type=3
+POST /ilink/bot/get_bot_qrcode?bot_type=3
+Body: { local_token_list: ["<bot_token>", ...] }
 → { qrcode: "<token>", qrcode_img_content: "<url>" }
 ```
+`local_token_list` carries up to 10 known local bot tokens (newest first) so the
+server can answer `binded_redirect` for an already-bound bot instead of issuing
+a duplicate session.
 
 ### Step 2: Poll Status
 ```
-GET /ilink/bot/get_qrcode_status?qrcode=<token>
+GET /ilink/bot/get_qrcode_status?qrcode=<token>[&verify_code=<digits>]
 Headers: { "iLink-App-ClientVersion": "1" }
-→ { status: "wait" | "scaned" | "confirmed" | "expired", bot_token?, ilink_bot_id?, ilink_user_id?, baseurl? }
+→ { status: "wait" | "scaned" | "confirmed" | "expired" | "scaned_but_redirect"
+          | "binded_redirect" | "need_verifycode" | "verify_code_blocked",
+    bot_token?, ilink_bot_id?, ilink_user_id?, baseurl?, redirect_host? }
 ```
+- `scaned_but_redirect`: switch polling to `https://<redirect_host>` (IDC redirect)
+- `binded_redirect`: the scanned bot is already bound to this client (matched via
+  `local_token_list`) — treat as success and reuse existing local credentials
+- `need_verifycode`: pair-code challenge — prompt the user for the digits shown in
+  WeChat on their phone and re-poll with `&verify_code=`. Getting `need_verifycode`
+  again means the code was wrong (re-prompt); getting `scaned` means it was accepted.
+- `verify_code_blocked`: too many wrong codes — this QR is dead, request a new one
 
 ## Common Headers (all POST requests)
 ```
@@ -25,7 +38,12 @@ AuthorizationType: ilink_bot_token
 Authorization: Bearer <bot_token>
 X-WECHAT-UIN: <base64(String(randomUint32))>
 ```
-All POST bodies include: `base_info: { channel_version: "<version>" }`
+All authorized POST bodies include:
+`base_info: { channel_version: "<version>", bot_agent: "<name>/<version> [(comment)]" }`
+
+`bot_agent` identifies the app driving the bot, UA-style grammar
+(`product *( SP product )`, product = `name "/" version [ SP "(" comment ")" ]`,
+max 256 bytes). Defaults to `WeChatBot/<version>` when unset or invalid.
 
 ## Get Updates (Long Poll)
 ```

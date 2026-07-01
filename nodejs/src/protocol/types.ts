@@ -56,6 +56,8 @@ export enum MediaType {
 
 export interface BaseInfo {
   channel_version: string
+  /** UA-style identifier of the app driving this bot (e.g. "MyApp/1.2 (prod)"). */
+  bot_agent?: string
 }
 
 export interface CDNMedia {
@@ -190,7 +192,15 @@ export interface QrCodeResponse {
 }
 
 export interface QrStatusResponse {
-  status: 'wait' | 'scaned' | 'confirmed' | 'expired' | 'scaned_but_redirect'
+  status:
+    | 'wait'
+    | 'scaned'
+    | 'confirmed'
+    | 'expired'
+    | 'scaned_but_redirect'
+    | 'binded_redirect'
+    | 'need_verifycode'
+    | 'verify_code_blocked'
   bot_token?: string
   ilink_bot_id?: string
   ilink_user_id?: string

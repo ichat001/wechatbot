@@ -38,6 +38,12 @@ export interface WeChatBotOptions {
   logger?: Logger
   /** QR login callbacks (for rendering QR codes, etc.) */
   loginCallbacks?: QrLoginCallbacks
+  /**
+   * UA-style identifier of the app driving this bot, sent as `base_info.bot_agent`
+   * on every API request (e.g. "MyApp/1.2 (prod)"). Invalid values fall back to
+   * "WeChatBot/<version>".
+   */
+  botAgent?: string
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -154,7 +160,7 @@ export class WeChatBot extends TypedEmitter<BotEventMap> {
 
     // Build the layered architecture
     this.http = new HttpClient({ logger: this.logger })
-    this.api = new ILinkApi(this.http)
+    this.api = new ILinkApi(this.http, options.botAgent)
     this.auth = new Authenticator(this.api, this.storage, this.logger)
     this.parser = new MessageParser()
     this.middleware = new MiddlewareEngine()

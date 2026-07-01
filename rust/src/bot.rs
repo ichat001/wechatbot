@@ -19,12 +19,39 @@ use serde_json::json;
 /// Message handler callback type.
 pub type MessageHandler = Box<dyn Fn(&IncomingMessage) + Send + Sync>;
 
+/// Default pairing-code prompt: read a line from stdin without blocking the runtime.
+async fn read_verify_code_from_stdin(is_retry: bool) -> Result<String> {
+    tokio::task::spawn_blocking(move || -> Result<String> {
+        use std::io::{BufRead, Write};
+        let prompt = if is_retry {
+            "Code mismatch — enter the pairing code shown in WeChat again: "
+        } else {
+            "Enter the pairing code shown in WeChat on your phone: "
+        };
+        eprint!("{}", prompt);
+        std::io::stderr().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line)?;
+        Ok(line.trim().to_string())
+    })
+    .await
+    .map_err(|e| WeChatBotError::Auth(format!("pairing code prompt failed: {e}")))?
+}
+
 /// Bot configuration options.
 pub struct BotOptions {
     pub base_url: Option<String>,
     pub cred_path: Option<String>,
     pub on_qr_url: Option<Box<dyn Fn(&str) + Send + Sync>>,
     pub on_error: Option<Box<dyn Fn(&WeChatBotError) + Send + Sync>>,
+    /// UA-style identifier of the app driving this bot, sent as
+    /// `base_info.bot_agent` on every API request (e.g. "MyApp/1.2 (prod)").
+    /// Invalid values fall back to `protocol::default_bot_agent()`.
+    pub bot_agent: Option<String>,
+    /// Called when the server requires a pairing code (the digits shown in
+    /// WeChat on the user's phone). The argument is true when a previously
+    /// submitted code was rejected. Defaults to a stdin prompt.
+    pub on_verify_code: Option<Box<dyn Fn(bool) -> String + Send + Sync>>,
 }
 
 impl Default for BotOptions {
@@ -34,6 +61,8 @@ impl Default for BotOptions {
             cred_path: None,
             on_qr_url: None,
             on_error: None,
+            bot_agent: None,
+            on_verify_code: None,
         }
     }
 }
@@ -51,13 +80,14 @@ pub struct WeChatBot {
     stopped: RwLock<bool>,
     on_qr_url: Option<Box<dyn Fn(&str) + Send + Sync>>,
     on_error: Option<Box<dyn Fn(&WeChatBotError) + Send + Sync>>,
+    on_verify_code: Option<Box<dyn Fn(bool) -> String + Send + Sync>>,
 }
 
 impl WeChatBot {
     /// Create a new bot instance.
     pub fn new(opts: BotOptions) -> Self {
         Self {
-            client: Arc::new(ILinkClient::new()),
+            client: Arc::new(ILinkClient::with_bot_agent(opts.bot_agent.as_deref())),
             cdn: CdnClient::new(),
             credentials: RwLock::new(None),
             context_tokens: RwLock::new(HashMap::new()),
@@ -71,6 +101,7 @@ impl WeChatBot {
             stopped: RwLock::new(false),
             on_qr_url: opts.on_qr_url,
             on_error: opts.on_error,
+            on_verify_code: opts.on_verify_code,
         }
     }
 
@@ -83,14 +114,23 @@ impl WeChatBot {
     pub async fn login(&self, force: bool) -> Result<Credentials> {
         let base_url = self.base_url.read().await.clone();
 
+        let stored = self.load_credentials().await?;
         if !force {
-            if let Some(creds) = self.load_credentials().await? {
+            if let Some(creds) = stored.clone() {
                 *self.credentials.write().await = Some(creds.clone());
                 *self.base_url.write().await = creds.base_url.clone();
                 info!("Loaded stored credentials for {}", creds.user_id);
                 return Ok(creds);
             }
         }
+
+        // Send known local tokens so the server can answer `binded_redirect`
+        // instead of issuing a duplicate session for an already-bound bot.
+        let local_token_list: Vec<String> = stored
+            .as_ref()
+            .filter(|c| !c.token.is_empty())
+            .map(|c| vec![c.token.clone()])
+            .unwrap_or_default();
 
         // QR code login flow
         let mut qr_refresh_count = 0u32;
@@ -103,7 +143,10 @@ impl WeChatBot {
                 )));
             }
 
-            let qr = self.client.get_qr_code(Self::FIXED_QR_BASE_URL).await?;
+            let qr = self
+                .client
+                .get_qr_code(Self::FIXED_QR_BASE_URL, &local_token_list)
+                .await?;
 
             if let Some(ref cb) = self.on_qr_url {
                 cb(&qr.qrcode_img_content);
@@ -113,20 +156,49 @@ impl WeChatBot {
 
             let mut last_status = String::new();
             let mut current_poll_base_url = Self::FIXED_QR_BASE_URL.to_string();
+            // Pairing code awaiting server verification (pair-code login flow)
+            let mut pending_verify_code: Option<String> = None;
             loop {
                 let status = self
                     .client
-                    .poll_qr_status(&current_poll_base_url, &qr.qrcode)
+                    .poll_qr_status(
+                        &current_poll_base_url,
+                        &qr.qrcode,
+                        pending_verify_code.as_deref(),
+                    )
                     .await?;
 
                 if status.status != last_status {
                     last_status = status.status.clone();
                     match status.status.as_str() {
-                        "scaned" => info!("QR scanned — confirm in WeChat"),
+                        "scaned" => {
+                            // A pending pairing code that leads back to
+                            // `scaned` was accepted
+                            pending_verify_code = None;
+                            info!("QR scanned — confirm in WeChat");
+                        }
                         "expired" => warn!("QR expired — requesting new one"),
                         "confirmed" => info!("Login confirmed"),
                         _ => {}
                     }
+                }
+
+                // Pair-code challenge: ask the user for the digits shown in WeChat
+                if status.status == "need_verifycode" {
+                    let is_retry = pending_verify_code.is_some();
+                    let code = match self.on_verify_code {
+                        Some(ref cb) => cb(is_retry),
+                        None => read_verify_code_from_stdin(is_retry).await?,
+                    };
+                    pending_verify_code = Some(code);
+                    continue; // Re-poll immediately with the code attached
+                }
+
+                // Too many wrong pairing codes: server blocked this QR — get a new one
+                if status.status == "verify_code_blocked" {
+                    warn!("Pairing code blocked after repeated mismatches — requesting new QR");
+                    pending_verify_code = None;
+                    break; // Outer loop requests a new QR (counts toward refresh limit)
                 }
 
                 if status.status == "confirmed" {
@@ -144,6 +216,21 @@ impl WeChatBot {
                     *self.credentials.write().await = Some(creds.clone());
                     *self.base_url.write().await = creds.base_url.clone();
                     return Ok(creds);
+                }
+
+                // Already bound to this client: reuse existing local credentials
+                if status.status == "binded_redirect" {
+                    if let Some(creds) = stored.clone() {
+                        info!("Bot already bound — reusing stored credentials");
+                        *self.credentials.write().await = Some(creds.clone());
+                        *self.base_url.write().await = creds.base_url.clone();
+                        return Ok(creds);
+                    }
+                    return Err(WeChatBotError::Auth(
+                        "server reports this bot is already bound to this client \
+                         (binded_redirect), but no local credentials were found"
+                            .into(),
+                    ));
                 }
 
                 // Handle IDC redirect
