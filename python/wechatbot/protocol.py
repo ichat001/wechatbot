@@ -203,12 +203,12 @@ class ILinkApi:
 
     async def notify_start(self, base_url: str, token: str) -> dict[str, Any]:
         """Notify the server that this client is starting (coming online)."""
-        body = {"base_info": _base_info()}
+        body = {"base_info": self._base_info()}
         return await self._post(base_url, "/ilink/bot/msg/notifystart", token, body)
 
     async def notify_stop(self, base_url: str, token: str) -> dict[str, Any]:
         """Notify the server that this client is stopping (going offline)."""
-        body = {"base_info": _base_info()}
+        body = {"base_info": self._base_info()}
         return await self._post(base_url, "/ilink/bot/msg/notifystop", token, body)
 
     @staticmethod

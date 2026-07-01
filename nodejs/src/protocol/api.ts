@@ -138,7 +138,7 @@ export class ILinkApi {
     return this.http.apiPost<Record<string, unknown>>(
       baseUrl,
       '/ilink/bot/msg/notifystart',
-      { base_info: baseInfo() },
+      { base_info: this.baseInfo() },
       buildAuthHeaders(token),
     )
   }
@@ -147,7 +147,7 @@ export class ILinkApi {
     return this.http.apiPost<Record<string, unknown>>(
       baseUrl,
       '/ilink/bot/msg/notifystop',
-      { base_info: baseInfo() },
+      { base_info: this.baseInfo() },
       buildAuthHeaders(token),
     )
   }

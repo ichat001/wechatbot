@@ -304,14 +304,14 @@ func (c *Client) SendTyping(ctx context.Context, baseURL, token, userID, ticket 
 
 // NotifyStart notifies the server that this client is starting (coming online).
 func (c *Client) NotifyStart(ctx context.Context, baseURL, token string) error {
-	body := map[string]interface{}{"base_info": baseInfo()}
+	body := map[string]interface{}{"base_info": c.baseInfo()}
 	_, err := c.apiPost(ctx, baseURL, "/ilink/bot/msg/notifystart", token, body, 15*time.Second)
 	return err
 }
 
 // NotifyStop notifies the server that this client is stopping (going offline).
 func (c *Client) NotifyStop(ctx context.Context, baseURL, token string) error {
-	body := map[string]interface{}{"base_info": baseInfo()}
+	body := map[string]interface{}{"base_info": c.baseInfo()}
 	_, err := c.apiPost(ctx, baseURL, "/ilink/bot/msg/notifystop", token, body, 15*time.Second)
 	return err
 }
