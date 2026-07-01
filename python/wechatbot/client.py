@@ -252,6 +252,13 @@ class WeChatBot:
         """Start the long-poll loop. Blocks until stop() is called."""
         creds = self._require_creds()
         self._stopped = False
+
+        # Tell the server we're coming online (non-fatal)
+        try:
+            await self._api.notify_start(creds.base_url, creds.token)
+        except Exception as e:
+            self._log(f"notify_start failed (ignored): {e}")
+
         self._log("Long-poll started")
         retry_delay = 1.0
 
@@ -300,6 +307,14 @@ class WeChatBot:
                 self._report_error(e)
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 10.0)
+
+        # Tell the server we're going offline (non-fatal).
+        # Credentials may have rotated after a mid-poll re-login, so re-read them.
+        try:
+            creds = self._require_creds()
+            await self._api.notify_stop(creds.base_url, creds.token)
+        except Exception as e:
+            self._log(f"notify_stop failed (ignored): {e}")
 
         self._log("Long-poll stopped")
 

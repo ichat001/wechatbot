@@ -195,6 +195,22 @@ impl ILinkClient {
         Ok(())
     }
 
+    /// Notify the server that this client is starting (coming online).
+    pub async fn notify_start(&self, base_url: &str, token: &str) -> Result<()> {
+        let body = json!({ "base_info": { "channel_version": CHANNEL_VERSION } });
+        self.api_post(base_url, "/ilink/bot/msg/notifystart", token, &body, 15)
+            .await?;
+        Ok(())
+    }
+
+    /// Notify the server that this client is stopping (going offline).
+    pub async fn notify_stop(&self, base_url: &str, token: &str) -> Result<()> {
+        let body = json!({ "base_info": { "channel_version": CHANNEL_VERSION } });
+        self.api_post(base_url, "/ilink/bot/msg/notifystop", token, &body, 15)
+            .await?;
+        Ok(())
+    }
+
     async fn api_post(
         &self,
         base_url: &str,

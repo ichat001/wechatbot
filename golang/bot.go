@@ -261,6 +261,23 @@ func (b *Bot) Run(ctx context.Context) error {
 	b.cancelPoll = cancel
 	b.mu.Unlock()
 
+	// Tell the server we're coming online (non-fatal)
+	if err := b.client.NotifyStart(pollCtx, creds.BaseURL, creds.Token); err != nil {
+		b.log("warn", "notifystart failed (ignored): %v", err)
+	}
+
+	// Tell the server we're going offline when the loop exits (non-fatal).
+	// Uses a fresh context because pollCtx is already canceled on Stop().
+	defer func() {
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancelStop()
+		if c := b.getCreds(); c != nil {
+			if err := b.client.NotifyStop(stopCtx, c.BaseURL, c.Token); err != nil {
+				b.log("warn", "notifystop failed (ignored): %v", err)
+			}
+		}
+	}()
+
 	b.log("info", "Long-poll loop started")
 	retryDelay := time.Second
 
