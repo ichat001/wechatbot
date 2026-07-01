@@ -25,6 +25,10 @@ jobs:
     defaults:
       run:
         working-directory: rust
+    # Named environment so publishes show up under GitHub → Deployments
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/wechatbot
     steps:
       - name: Checkout
         uses: actions/checkout@v4

@@ -26,6 +26,10 @@ jobs:
     defaults:
       run:
         working-directory: nodejs
+    # Named environment so publishes show up under GitHub → Deployments
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@wechatbot/wechatbot
     steps:
       - name: Checkout
         uses: actions/checkout@v4
