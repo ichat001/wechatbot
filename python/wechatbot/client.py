@@ -77,6 +77,7 @@ class WeChatBot:
         on_scanned: Callable[[], None] | None = None,
         on_expired: Callable[[], None] | None = None,
         on_error: Callable[[Exception], None] | None = None,
+        bot_agent: str | None = None,
     ) -> None:
         self._base_url = base_url or DEFAULT_BASE_URL
         self._cred_path = Path(cred_path) if cred_path else None
@@ -85,7 +86,7 @@ class WeChatBot:
         self._on_expired = on_expired
         self._on_error = on_error
 
-        self._api = ILinkApi()
+        self._api = ILinkApi(bot_agent=bot_agent)
         self._credentials: Credentials | None = None
         self._context_tokens: dict[str, str] = {}
         self._handlers: list[MessageHandler] = []

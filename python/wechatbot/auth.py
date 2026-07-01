@@ -68,10 +68,13 @@ async def login(
     on_expired: Callable[[], None] | None = None,
 ) -> Credentials:
     """QR code login. Returns stored credentials if available and force=False."""
-    if not force:
-        stored = await load_credentials(cred_path)
-        if stored:
-            return stored
+    stored = await load_credentials(cred_path)
+    if not force and stored:
+        return stored
+
+    # Send known local tokens so the server can answer binded_redirect
+    # instead of issuing a duplicate session for an already-bound bot.
+    local_token_list = [stored.token] if stored and stored.token else []
 
     qr_refresh_count = 0
     while True:
@@ -81,7 +84,7 @@ async def login(
                 f"QR code expired {MAX_QR_REFRESH_COUNT} times — login aborted"
             )
 
-        qr = await api.get_qr_code(FIXED_QR_BASE_URL)
+        qr = await api.get_qr_code(FIXED_QR_BASE_URL, local_token_list)
         qr_url = qr["qrcode_img_content"]
 
         if on_qr_url:
@@ -128,6 +131,19 @@ async def login(
                 )
                 await save_credentials(creds, cred_path)
                 return creds
+
+            # Already bound to this client: reuse existing local credentials
+            if current == "binded_redirect":
+                if stored:
+                    print(
+                        "[wechatbot] Bot already bound — reusing stored credentials",
+                        file=sys.stderr,
+                    )
+                    return stored
+                raise AuthError(
+                    "Server reports this bot is already bound to this client "
+                    "(binded_redirect), but no local credentials were found"
+                )
 
             # Handle IDC redirect
             if current == "scaned_but_redirect":

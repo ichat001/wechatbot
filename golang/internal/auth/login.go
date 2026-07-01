@@ -91,11 +91,16 @@ func Login(ctx context.Context, client *protocol.Client, opts LoginOptions) (*Cr
 		baseURL = protocol.DefaultBaseURL
 	}
 
-	if !opts.Force {
-		creds, err := LoadCredentials(opts.CredPath)
-		if err == nil && creds != nil {
-			return creds, nil
-		}
+	stored, _ := LoadCredentials(opts.CredPath)
+	if !opts.Force && stored != nil {
+		return stored, nil
+	}
+
+	// Send known local tokens so the server can answer binded_redirect
+	// instead of issuing a duplicate session for an already-bound bot.
+	var localTokenList []string
+	if stored != nil && stored.Token != "" {
+		localTokenList = []string{stored.Token}
 	}
 
 	qrRefreshCount := 0
@@ -105,7 +110,7 @@ func Login(ctx context.Context, client *protocol.Client, opts LoginOptions) (*Cr
 			return nil, fmt.Errorf("QR code expired %d times — login aborted", maxQRRefreshCount)
 		}
 
-		qr, err := client.GetQRCode(ctx, fixedQRBaseURL)
+		qr, err := client.GetQRCode(ctx, fixedQRBaseURL, localTokenList)
 		if err != nil {
 			return nil, fmt.Errorf("get QR code: %w", err)
 		}
@@ -163,6 +168,15 @@ func Login(ctx context.Context, client *protocol.Client, opts LoginOptions) (*Cr
 					fmt.Fprintf(os.Stderr, "[wechatbot] Warning: could not save credentials: %v\n", err)
 				}
 				return creds, nil
+			}
+
+			// Already bound to this client: reuse existing local credentials
+			if status.Status == "binded_redirect" {
+				if stored != nil {
+					fmt.Fprintln(os.Stderr, "[wechatbot] Bot already bound — reusing stored credentials")
+					return stored, nil
+				}
+				return nil, fmt.Errorf("server reports this bot is already bound to this client (binded_redirect), but no local credentials were found")
 			}
 
 			// Handle IDC redirect

@@ -78,6 +78,11 @@ export class Authenticator {
   private async qrLogin(baseUrl: string, callbacks?: QrLoginCallbacks): Promise<Credentials> {
     let qrRefreshCount = 0
 
+    // Send known local tokens so the server can answer `binded_redirect`
+    // instead of issuing a duplicate session for an already-bound bot.
+    const stored = await this.loadCredentials()
+    const localTokenList = stored?.token ? [stored.token] : []
+
     for (;;) {
       qrRefreshCount++
       if (qrRefreshCount > MAX_QR_REFRESH_COUNT) {
@@ -85,7 +90,7 @@ export class Authenticator {
       }
 
       this.logger.info(`Requesting QR code... (${qrRefreshCount}/${MAX_QR_REFRESH_COUNT})`)
-      const qr = await this.api.getQrCode(FIXED_QR_BASE_URL)
+      const qr = await this.api.getQrCode(FIXED_QR_BASE_URL, localTokenList)
 
       // Pass QR URL to developer's callback — display is their responsibility
       if (callbacks?.onQrUrl) {
@@ -135,6 +140,18 @@ export class Authenticator {
           })
 
           return credentials
+        }
+
+        // Already bound to this client: reuse existing local credentials
+        if (status.status === 'binded_redirect') {
+          if (stored) {
+            this.logger.info('Bot already bound to this client — reusing stored credentials')
+            return stored
+          }
+          throw new AuthError(
+            'Server reports this bot is already bound to this client (binded_redirect), ' +
+              'but no local credentials were found',
+          )
         }
 
         // IDC redirect: switch polling host

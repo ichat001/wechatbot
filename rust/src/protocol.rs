@@ -30,6 +30,139 @@ fn build_client_version() -> String {
     num.to_string()
 }
 
+/// Default `bot_agent` when none is configured or the configured value is invalid.
+pub fn default_bot_agent() -> String {
+    format!("WeChatBot/{}", CHANNEL_VERSION)
+}
+
+/// Maximum length (bytes) of the sanitized `bot_agent` string.
+const BOT_AGENT_MAX_LEN: usize = 256;
+
+fn is_valid_product(tok: &str) -> bool {
+    let Some((name, version)) = tok.split_once('/') else {
+        return false;
+    };
+    (1..=32).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+        && (1..=32).contains(&version.len())
+        && version
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'+' | b'-'))
+}
+
+/// Validate a user-supplied `bot_agent` into a wire-safe string.
+///
+/// UA-style grammar (matches openclaw-weixin):
+///   bot_agent = product *( SP product )
+///   product   = name "/" version [ SP "(" comment ")" ]
+///   name      = 1*32( ALPHA / DIGIT / "_" / "." / "-" )
+///   version   = 1*32( ALPHA / DIGIT / "_" / "." / "+" / "-" )
+///   comment   = 1*64( printable ASCII minus "(" ")" )
+///
+/// Unlike upstream openclaw-weixin (which salvages the valid tokens out of a
+/// partially invalid string), any invalid input falls back to
+/// `default_bot_agent()` wholesale — simpler and just as safe on the wire.
+pub fn sanitize_bot_agent(raw: Option<&str>) -> String {
+    let default = default_bot_agent();
+    let Some(raw) = raw else { return default };
+
+    // Normalize whitespace, keeping multi-word "(comment)" tokens intact.
+    let mut tokens: Vec<String> = Vec::new();
+    let mut in_comment = false;
+    for word in raw.split_whitespace() {
+        if in_comment {
+            let last = tokens.last_mut().expect("comment follows a token");
+            last.push(' ');
+            last.push_str(word);
+            in_comment = !word.ends_with(')');
+        } else {
+            tokens.push(word.to_string());
+            in_comment = word.starts_with('(') && !word.ends_with(')');
+        }
+    }
+    if tokens.is_empty() || in_comment {
+        return default;
+    }
+
+    // Validate: each token is a product, or a "(comment)" directly after one.
+    let mut prev_was_product = false;
+    for tok in &tokens {
+        if tok.starts_with('(') && tok.ends_with(')') && tok.len() >= 2 {
+            let inner = &tok[1..tok.len() - 1];
+            let ok = prev_was_product
+                && (1..=64).contains(&inner.len())
+                && inner
+                    .bytes()
+                    .all(|b| (0x20..=0x7e).contains(&b) && b != b'(' && b != b')');
+            if !ok {
+                return default;
+            }
+            prev_was_product = false;
+        } else if is_valid_product(tok) {
+            prev_was_product = true;
+        } else {
+            return default;
+        }
+    }
+
+    let joined = tokens.join(" ");
+    if joined.len() > BOT_AGENT_MAX_LEN {
+        return default;
+    }
+    joined
+}
+
+#[cfg(test)]
+mod bot_agent_tests {
+    use super::*;
+
+    #[test]
+    fn empty_input_falls_back_to_default() {
+        assert_eq!(sanitize_bot_agent(None), default_bot_agent());
+        assert_eq!(sanitize_bot_agent(Some("")), default_bot_agent());
+        assert_eq!(sanitize_bot_agent(Some("   ")), default_bot_agent());
+    }
+
+    #[test]
+    fn valid_agents_pass_through() {
+        assert_eq!(sanitize_bot_agent(Some("MyApp/1.2")), "MyApp/1.2");
+        assert_eq!(
+            sanitize_bot_agent(Some("MyApp/1.2 (prod build)")),
+            "MyApp/1.2 (prod build)"
+        );
+        assert_eq!(
+            sanitize_bot_agent(Some("MyApp/1.2 (prod) Lib/0.3")),
+            "MyApp/1.2 (prod) Lib/0.3"
+        );
+        assert_eq!(
+            sanitize_bot_agent(Some("  MyApp/1.2   Lib/0.3 ")),
+            "MyApp/1.2 Lib/0.3"
+        );
+    }
+
+    #[test]
+    fn invalid_agents_fall_back_wholesale() {
+        for bad in [
+            "no-slash",
+            "bad name/1.0 !!!",
+            "(orphan comment)",
+            "App/1.0 (unclosed",
+            "App/1.0 (nested (comment))",
+        ] {
+            assert_eq!(sanitize_bot_agent(Some(bad)), default_bot_agent(), "{bad}");
+        }
+        let long_name = format!("{}/1.0", "a".repeat(33));
+        assert_eq!(sanitize_bot_agent(Some(&long_name)), default_bot_agent());
+        let over_cap = "App/1.0 ".repeat(40);
+        assert_eq!(
+            sanitize_bot_agent(Some(over_cap.trim())),
+            default_bot_agent()
+        );
+    }
+}
+
 /// Generate the X-WECHAT-UIN header value.
 pub fn random_wechat_uin() -> String {
     let mut buf = [0u8; 4];
@@ -80,25 +213,48 @@ pub struct GetConfigResponse {
 #[derive(Debug)]
 pub struct ILinkClient {
     http: Client,
+    bot_agent: String,
 }
 
 impl ILinkClient {
     pub fn new() -> Self {
+        Self::with_bot_agent(None)
+    }
+
+    /// Create a client with a custom `bot_agent` (sent as `base_info.bot_agent`
+    /// on every API request). Invalid values fall back to `default_bot_agent()`.
+    pub fn with_bot_agent(bot_agent: Option<&str>) -> Self {
         Self {
             http: Client::builder()
                 .timeout(Duration::from_secs(45))
                 .build()
                 .unwrap(),
+            bot_agent: sanitize_bot_agent(bot_agent),
         }
     }
 
-    pub async fn get_qr_code(&self, base_url: &str) -> Result<QrCodeResponse> {
+    fn base_info(&self) -> Value {
+        json!({ "channel_version": CHANNEL_VERSION, "bot_agent": self.bot_agent })
+    }
+
+    /// Request a login QR code.
+    ///
+    /// `local_token_list` carries up to 10 known local bot tokens (newest
+    /// first) so the server can answer `binded_redirect` for an already-bound
+    /// bot instead of issuing a duplicate session.
+    pub async fn get_qr_code(
+        &self,
+        base_url: &str,
+        local_token_list: &[String],
+    ) -> Result<QrCodeResponse> {
         let url = format!("{}/ilink/bot/get_bot_qrcode?bot_type=3", base_url);
         let resp = self
             .http
-            .get(&url)
+            .post(&url)
+            .header("Content-Type", "application/json")
             .header("iLink-App-Id", ILINK_APP_ID)
             .header("iLink-App-ClientVersion", build_client_version())
+            .json(&json!({ "local_token_list": local_token_list }))
             .send()
             .await?;
         Ok(resp.json().await?)
@@ -128,7 +284,7 @@ impl ILinkClient {
     ) -> Result<GetUpdatesResponse> {
         let body = json!({
             "get_updates_buf": cursor,
-            "base_info": { "channel_version": CHANNEL_VERSION }
+            "base_info": self.base_info()
         });
         let resp = self
             .api_post(base_url, "/ilink/bot/getupdates", token, &body, 45)
@@ -151,7 +307,7 @@ impl ILinkClient {
     pub async fn send_message(&self, base_url: &str, token: &str, msg: &Value) -> Result<()> {
         let body = json!({
             "msg": msg,
-            "base_info": { "channel_version": CHANNEL_VERSION }
+            "base_info": self.base_info()
         });
         self.api_post(base_url, "/ilink/bot/sendmessage", token, &body, 15)
             .await?;
@@ -168,7 +324,7 @@ impl ILinkClient {
         let body = json!({
             "ilink_user_id": user_id,
             "context_token": context_token,
-            "base_info": { "channel_version": CHANNEL_VERSION }
+            "base_info": self.base_info()
         });
         let resp = self
             .api_post(base_url, "/ilink/bot/getconfig", token, &body, 15)
@@ -188,7 +344,7 @@ impl ILinkClient {
             "ilink_user_id": user_id,
             "typing_ticket": ticket,
             "status": status,
-            "base_info": { "channel_version": CHANNEL_VERSION }
+            "base_info": self.base_info()
         });
         self.api_post(base_url, "/ilink/bot/sendtyping", token, &body, 15)
             .await?;
@@ -302,7 +458,7 @@ impl ILinkClient {
             "filesize": params.filesize,
             "no_need_thumb": params.no_need_thumb,
             "aeskey": params.aeskey,
-            "base_info": { "channel_version": CHANNEL_VERSION }
+            "base_info": self.base_info()
         });
         let resp = self
             .api_post(base_url, "/ilink/bot/getuploadurl", token, &body, 15)

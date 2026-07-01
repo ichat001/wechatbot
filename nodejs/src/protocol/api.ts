@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { HttpClient } from '../transport/http.js'
+import { sanitizeBotAgent } from './bot-agent.js'
 import { buildAuthHeaders, buildCommonHeaders } from './headers.js'
 import {
   CHANNEL_VERSION,
@@ -17,24 +18,38 @@ import {
   type WireMessageItem,
 } from './types.js'
 
-function baseInfo(): BaseInfo {
-  return { channel_version: CHANNEL_VERSION }
-}
-
 /**
  * Low-level iLink API calls.
  * Each method maps 1:1 to an API endpoint.
  * No business logic — just wire protocol.
  */
 export class ILinkApi {
-  constructor(private readonly http: HttpClient) {}
+  private readonly botAgent: string
+
+  constructor(
+    private readonly http: HttpClient,
+    botAgent?: string,
+  ) {
+    this.botAgent = sanitizeBotAgent(botAgent)
+  }
+
+  private baseInfo(): BaseInfo {
+    return { channel_version: CHANNEL_VERSION, bot_agent: this.botAgent }
+  }
 
   // ── Auth ──────────────────────────────────────────────────────────────
 
-  async getQrCode(baseUrl: string): Promise<QrCodeResponse> {
-    return this.http.apiGet<QrCodeResponse>(
+  /**
+   * Request a login QR code.
+   * `localTokenList` carries up to 10 known local bot tokens (newest first) so
+   * the server can answer `binded_redirect` for an already-bound bot instead
+   * of issuing a duplicate session.
+   */
+  async getQrCode(baseUrl: string, localTokenList: string[] = []): Promise<QrCodeResponse> {
+    return this.http.apiPost<QrCodeResponse>(
       baseUrl,
       '/ilink/bot/get_bot_qrcode?bot_type=3',
+      { local_token_list: localTokenList },
       buildCommonHeaders(),
     )
   }
@@ -58,7 +73,7 @@ export class ILinkApi {
     return this.http.apiPost<GetUpdatesResponse>(
       baseUrl,
       '/ilink/bot/getupdates',
-      { get_updates_buf: cursor, base_info: baseInfo() },
+      { get_updates_buf: cursor, base_info: this.baseInfo() },
       buildAuthHeaders(token),
       { timeoutMs: 40_000, signal },
     )
@@ -72,7 +87,7 @@ export class ILinkApi {
     return this.http.apiPost<Record<string, unknown>>(
       baseUrl,
       '/ilink/bot/sendmessage',
-      { msg, base_info: baseInfo() },
+      { msg, base_info: this.baseInfo() },
       buildAuthHeaders(token),
     )
   }
@@ -88,7 +103,7 @@ export class ILinkApi {
     return this.http.apiPost<GetConfigResponse>(
       baseUrl,
       '/ilink/bot/getconfig',
-      { ilink_user_id: userId, context_token: contextToken, base_info: baseInfo() },
+      { ilink_user_id: userId, context_token: contextToken, base_info: this.baseInfo() },
       buildAuthHeaders(token),
     )
   }
@@ -103,7 +118,7 @@ export class ILinkApi {
     return this.http.apiPost<Record<string, unknown>>(
       baseUrl,
       '/ilink/bot/sendtyping',
-      { ilink_user_id: userId, typing_ticket: ticket, status, base_info: baseInfo() },
+      { ilink_user_id: userId, typing_ticket: ticket, status, base_info: this.baseInfo() },
       buildAuthHeaders(token),
     )
   }
@@ -118,7 +133,7 @@ export class ILinkApi {
     return this.http.apiPost<GetUploadUrlResponse>(
       baseUrl,
       '/ilink/bot/getuploadurl',
-      { ...params, base_info: baseInfo() },
+      { ...params, base_info: this.baseInfo() },
       buildAuthHeaders(token),
     )
   }

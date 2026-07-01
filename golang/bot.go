@@ -35,6 +35,10 @@ type Options struct {
 	OnScanned    func()
 	OnExpired    func()
 	OnError      func(err error)
+	// BotAgent identifies the app driving this bot, sent as base_info.bot_agent
+	// on every API request (e.g. "MyApp/1.2 (prod)"). Invalid values fall back
+	// to protocol.DefaultBotAgent.
+	BotAgent     string
 }
 
 // Bot is the main WeChat bot client.
@@ -59,9 +63,11 @@ func New(opts ...Options) *Bot {
 	if o.BaseURL == "" {
 		o.BaseURL = protocol.DefaultBaseURL
 	}
+	client := protocol.NewClient()
+	client.BotAgent = protocol.SanitizeBotAgent(o.BotAgent)
 	return &Bot{
 		opts:   o,
-		client: protocol.NewClient(),
+		client: client,
 	}
 }
 

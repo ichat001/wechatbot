@@ -25,6 +25,10 @@ pub struct BotOptions {
     pub cred_path: Option<String>,
     pub on_qr_url: Option<Box<dyn Fn(&str) + Send + Sync>>,
     pub on_error: Option<Box<dyn Fn(&WeChatBotError) + Send + Sync>>,
+    /// UA-style identifier of the app driving this bot, sent as
+    /// `base_info.bot_agent` on every API request (e.g. "MyApp/1.2 (prod)").
+    /// Invalid values fall back to `protocol::default_bot_agent()`.
+    pub bot_agent: Option<String>,
 }
 
 impl Default for BotOptions {
@@ -34,6 +38,7 @@ impl Default for BotOptions {
             cred_path: None,
             on_qr_url: None,
             on_error: None,
+            bot_agent: None,
         }
     }
 }
@@ -57,7 +62,7 @@ impl WeChatBot {
     /// Create a new bot instance.
     pub fn new(opts: BotOptions) -> Self {
         Self {
-            client: Arc::new(ILinkClient::new()),
+            client: Arc::new(ILinkClient::with_bot_agent(opts.bot_agent.as_deref())),
             cdn: CdnClient::new(),
             credentials: RwLock::new(None),
             context_tokens: RwLock::new(HashMap::new()),
@@ -83,14 +88,23 @@ impl WeChatBot {
     pub async fn login(&self, force: bool) -> Result<Credentials> {
         let base_url = self.base_url.read().await.clone();
 
+        let stored = self.load_credentials().await?;
         if !force {
-            if let Some(creds) = self.load_credentials().await? {
+            if let Some(creds) = stored.clone() {
                 *self.credentials.write().await = Some(creds.clone());
                 *self.base_url.write().await = creds.base_url.clone();
                 info!("Loaded stored credentials for {}", creds.user_id);
                 return Ok(creds);
             }
         }
+
+        // Send known local tokens so the server can answer `binded_redirect`
+        // instead of issuing a duplicate session for an already-bound bot.
+        let local_token_list: Vec<String> = stored
+            .as_ref()
+            .filter(|c| !c.token.is_empty())
+            .map(|c| vec![c.token.clone()])
+            .unwrap_or_default();
 
         // QR code login flow
         let mut qr_refresh_count = 0u32;
@@ -103,7 +117,10 @@ impl WeChatBot {
                 )));
             }
 
-            let qr = self.client.get_qr_code(Self::FIXED_QR_BASE_URL).await?;
+            let qr = self
+                .client
+                .get_qr_code(Self::FIXED_QR_BASE_URL, &local_token_list)
+                .await?;
 
             if let Some(ref cb) = self.on_qr_url {
                 cb(&qr.qrcode_img_content);
@@ -144,6 +161,21 @@ impl WeChatBot {
                     *self.credentials.write().await = Some(creds.clone());
                     *self.base_url.write().await = creds.base_url.clone();
                     return Ok(creds);
+                }
+
+                // Already bound to this client: reuse existing local credentials
+                if status.status == "binded_redirect" {
+                    if let Some(creds) = stored.clone() {
+                        info!("Bot already bound — reusing stored credentials");
+                        *self.credentials.write().await = Some(creds.clone());
+                        *self.base_url.write().await = creds.base_url.clone();
+                        return Ok(creds);
+                    }
+                    return Err(WeChatBotError::Auth(
+                        "server reports this bot is already bound to this client \
+                         (binded_redirect), but no local credentials were found"
+                            .into(),
+                    ));
                 }
 
                 // Handle IDC redirect
