@@ -194,10 +194,10 @@ impl WeChatBot {
                     continue; // Re-poll immediately with the code attached
                 }
 
-                // Too many wrong pairing codes: server blocked this QR — get a new one
+                // Too many wrong pairing codes: server blocked this QR — get a new
+                // one (the fresh QR loop re-initializes pending_verify_code)
                 if status.status == "verify_code_blocked" {
                     warn!("Pairing code blocked after repeated mismatches — requesting new QR");
-                    pending_verify_code = None;
                     break; // Outer loop requests a new QR (counts toward refresh limit)
                 }
 
