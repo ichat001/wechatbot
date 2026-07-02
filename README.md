@@ -15,7 +15,7 @@
 
 [English](README.EN.MD)
 
-5 分钟让任何 Agent 接入微信。灵感来自 [openclaw-weixin-cli](https://www.npmjs.com/package/@tencent-weixin/openclaw-weixin)。
+5 分钟让任何 Agent 接入微信。灵感来自 [openclaw-weixin-cli](https://github.com/Tencent/openclaw-weixin)。
 
 ## 📦 SDK 一览
 
