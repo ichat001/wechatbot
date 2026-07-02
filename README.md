@@ -208,6 +208,10 @@ wechatbot/
     └── architecture.md    #   架构 & SDK 对比
 ```
 
+## ⭐ Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=corespeed-io/wechatbot&type=Date)](https://star-history.com/#corespeed-io/wechatbot&Date)
+
 ## 📄 License
 
 [MIT](LICENSE)
