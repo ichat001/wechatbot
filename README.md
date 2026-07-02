@@ -102,6 +102,34 @@ bot.run().await?;
 | 📝 结构化日志 | 分级、上下文感知、可插拔传输 |
 | 🏗️ 消息构建器 | `.text().image().file().build()` 链式 API |
 
+## 👥 多租户 / 多账号
+
+每个 Bot 实例完全隔离（独立 HTTP 客户端、事件、消息轮询器），无全局状态、不占本地端口——一个后端进程可以同时运行多个微信账号。二维码通过回调返回，可推给 Web 前端让每个用户在自己的页面上扫码：
+
+```typescript
+// 每个租户一个实例，凭证按租户隔离
+const bot = new WeChatBot({
+  storage: new PostgresStorage(pool, tenantId),  // 或 { storageDir: `/data/${tenantId}` }
+})
+
+await bot.login({
+  callbacks: {
+    onQrUrl: (url) => pushQrToWebUI(tenantId, url),  // 推给该用户的页面扫码
+    onScanned: () => notify(tenantId, '已扫码，等待确认'),
+    onExpired: () => refreshQr(tenantId),
+  },
+})
+await bot.start()
+```
+
+三条注意事项：
+
+1. **存储隔离** — 每个账号必须有独立的 `storageDir` 或存储命名空间，共用会互相覆盖凭证。
+2. **单账号单实例** — 同一账号在全集群只能有一个实例轮询消息，否则游标互相覆盖；多机部署用 advisory lock 或租约表选主。
+3. **重启免扫码** — 凭证已持久化，重启后 `login()` 自动恢复会话。
+
+完整示例（含 PostgreSQL 自定义存储）见 [Node.js SDK 文档](https://github.com/jiweiyuan/wechatbot-landing)。
+
 ## 🏗 架构
 
 ```mermaid
