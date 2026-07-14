@@ -3,6 +3,9 @@ name: Build Windows EXE
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write          # 允许创建 Release 和推送 tag
+
 jobs:
   build:
     runs-on: windows-latest
@@ -21,14 +24,24 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Build echo_bot
-        run: cargo build --release --example echo_bot
+      - name: Build n8n_bot
+        run: cargo build --release --example n8n_bot
 
-      - name: List output
-        run: dir target\release\examples
+      - name: Generate timestamp tag and release name
+        id: vars
+        shell: pwsh
+        run: |
+          $ts = Get-Date -Format "yyyyMMdd-HHmmss"
+          echo "tag=n8n-bot-$ts" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          echo "name=n8n_bot $ts" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Upload EXE
-        uses: actions/upload-artifact@v4
+      - name: Create Release and Upload EXE
+        uses: softprops/action-gh-release@v1
         with:
-          name: echo_bot-windows
-          path: rust/target/release/examples/echo_bot.exe
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: ${{ steps.vars.outputs.name }}
+          files: rust/target/release/examples/n8n_bot.exe
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
