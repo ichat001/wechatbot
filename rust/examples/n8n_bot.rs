@@ -162,32 +162,71 @@ async fn handle_message(
     // 5. 根据解析结果发送消息
     if !files_to_send.is_empty() {
         for (i, file_path) in files_to_send.iter().enumerate() {
+            let path = Path::new(file_path);
+            // 检查文件是否存在
+            if !path.exists() {
+                let err_text = format!("文件不存在: {}", file_path);
+                eprintln!("← Error: {}", err_text);
+                bot.reply(&msg, &err_text).await?;
+                continue;
+            }
+            // 检查是否为文件
+            if !path.is_file() {
+                let err_text = format!("路径不是文件: {}", file_path);
+                eprintln!("← Error: {}", err_text);
+                bot.reply(&msg, &err_text).await?;
+                continue;
+            }
+
             match fs::read(&file_path).await {
                 Ok(data) => {
+                    let file_size = data.len();
+                    if file_size == 0 {
+                        let err_text = format!("文件为空: {}", file_path);
+                        eprintln!("← Error: {}", err_text);
+                        bot.reply(&msg, &err_text).await?;
+                        continue;
+                    }
+
+                    let file_name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("file")
+                        .to_string();
+
+                    // caption 只在最后一个文件上附加
                     let caption = if i == files_to_send.len() - 1 && !reply_text.is_empty() {
                         Some(reply_text.clone())
                     } else {
                         None
                     };
-                    bot.reply_media(
-                        &msg,
-                        SendContent::File {
-                            data,
-                            file_name: Path::new(file_path)
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("file")
-                                .to_string(),
-                            caption,
-                        },
-                    )
-                    .await?;
-                    println!("← Sent file: {}", file_path);
+
+                    // 注意：此处依赖修改后的 wechatbot 库，库内已将 SendContent::File 统一为普通文件发送
+                    let content = SendContent::File {
+                        data,
+                        file_name,
+                        caption,
+                    };
+
+                    match bot.reply_media(&msg, content).await {
+                        Ok(_) => {
+                            println!(
+                                "← Sent file: {} ({} bytes)",
+                                file_path, file_size
+                            );
+                        }
+                        Err(e) => {
+                            let error_text =
+                                format!("发送文件 {} 失败：{}", file_path, e);
+                            eprintln!("← Error: {}", error_text);
+                            bot.reply(&msg, &error_text).await?;
+                        }
+                    }
                 }
                 Err(e) => {
-                    let error_text = format!("发送文件 {} 失败：{}", file_path, e);
+                    let error_text = format!("读取文件 {} 失败：{}", file_path, e);
+                    eprintln!("← Error: {}", error_text);
                     bot.reply(&msg, &error_text).await?;
-                    println!("← Error: {}", error_text);
                 }
             }
         }
