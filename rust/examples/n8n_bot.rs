@@ -8,8 +8,6 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use wechatbot::{
-    crypto::encode_aes_key_hex,
-    protocol::{build_media_message, ILinkClient},
     BotOptions, ContentType, IncomingMessage, SendContent, WeChatBot,
 };
 
@@ -18,9 +16,7 @@ const N8N_TIMEOUT_MS: u64 = 120_000; // 2 分钟
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .init();
+    tracing_subscriber::fmt::init();
 
     let bot = Arc::new(WeChatBot::new(BotOptions {
         on_qr_url: Some(Box::new(|url| {
@@ -35,15 +31,12 @@ async fn main() {
     let creds = bot.login(false).await.expect("登录失败");
     println!("Logged in: {} ({})", creds.account_id, creds.user_id);
 
-    let auth = Arc::new((creds.base_url.clone(), creds.token.clone()));
-
     let bot_for_handler = Arc::clone(&bot);
     bot.on_message(Box::new(move |msg| {
         let bot = Arc::clone(&bot_for_handler);
-        let auth = Arc::clone(&auth);
         let msg = msg.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_message(bot, auth, msg).await {
+            if let Err(e) = handle_message(bot, msg).await {
                 eprintln!("处理消息出错: {}", e);
             }
         });
@@ -54,26 +47,14 @@ async fn main() {
     bot.run().await.expect("运行失败");
 }
 
-fn media_type_from_path(path: &Path) -> &'static str {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    match ext.as_str() {
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" => "image",
-        "mp4" | "mov" | "webm" | "mkv" | "avi" => "video",
-        _ => "file",
-    }
-}
-
 async fn handle_message(
     bot: Arc<WeChatBot>,
-    auth: Arc<(String, String)>,
     msg: IncomingMessage,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // 1. 发送 "正在输入" 状态
     let _ = bot.send_typing(&msg.user_id).await;
 
+    // 2. 构建 payload
     let mut payload = serde_json::json!({
         "message": {
             "userId": msg.user_id,
@@ -85,6 +66,7 @@ async fn handle_message(
         }
     });
 
+    // 3. 处理媒体文件
     match msg.content_type {
         ContentType::Image | ContentType::Video | ContentType::File => {
             if let Ok(Some(media)) = bot.download(&msg).await {
@@ -95,6 +77,7 @@ async fn handle_message(
                 };
                 let file_name = media.file_name.as_deref().unwrap_or(ext).to_string();
 
+                // 保存到用户目录下的 .n8n/www/<userId> 目录
                 let home = if cfg!(windows) {
                     env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string())
                 } else {
@@ -104,10 +87,12 @@ async fn handle_message(
                 fs::create_dir_all(&base_dir).await?;
 
                 let file_path = base_dir.join(&file_name);
+
                 let mut file = fs::File::create(&file_path).await?;
                 file.write_all(&media.data).await?;
                 file.sync_all().await?;
 
+                // 转换为正斜杠路径
                 let path_str = file_path.to_string_lossy().replace("\\", "/");
                 payload["message"]["mediaPath"] = serde_json::json!(path_str);
                 payload["message"]["mediaType"] = serde_json::json!(media_type);
@@ -125,6 +110,7 @@ async fn handle_message(
         _ => {}
     }
 
+    // 4. 转发到 n8n
     println!(
         "→ Forwarding to n8n: {} {}",
         payload["message"]["type"].as_str().unwrap_or("?"),
@@ -144,6 +130,8 @@ async fn handle_message(
     }
 
     let result: serde_json::Value = response.json().await?;
+
+    // AI Agent 输出为数组，取第一个元素
     let output_obj = if let Some(arr) = result.as_array() {
         arr.first().cloned().unwrap_or_default()
     } else {
@@ -151,8 +139,9 @@ async fn handle_message(
     };
     let output_text = output_obj["output"].as_str().unwrap_or("").to_string();
 
+    // 解析 FILE: 指令
     let mut files_to_send: Vec<String> = Vec::new();
-    let reply_text;
+    let mut reply_text = String::new();
 
     if let Some(first_line) = output_text.lines().next() {
         if let Some(paths_str) = first_line.strip_prefix("FILE:") {
@@ -170,15 +159,18 @@ async fn handle_message(
         reply_text = output_text;
     }
 
+    // 5. 根据解析结果发送消息
     if !files_to_send.is_empty() {
         for (i, file_path) in files_to_send.iter().enumerate() {
             let path = Path::new(file_path);
+            // 检查文件是否存在
             if !path.exists() {
                 let err_text = format!("文件不存在: {}", file_path);
                 eprintln!("← Error: {}", err_text);
                 bot.reply(&msg, &err_text).await?;
                 continue;
             }
+            // 检查是否为文件
             if !path.is_file() {
                 let err_text = format!("路径不是文件: {}", file_path);
                 eprintln!("← Error: {}", err_text);
@@ -202,77 +194,45 @@ async fn handle_message(
                         .unwrap_or("file")
                         .to_string();
 
+                    // caption 只在最后一个文件上附加
                     let caption = if i == files_to_send.len() - 1 && !reply_text.is_empty() {
                         Some(reply_text.clone())
                     } else {
                         None
                     };
 
-                    let media_type = media_type_from_path(path);
+                    // 根据扩展名选择 SendContent 变体
+                    let ext = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let content = match ext.as_str() {
+                        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" => {
+                            SendContent::Image { data, caption }
+                        }
+                        "mp4" | "mov" | "webm" | "mkv" | "avi" => {
+                            SendContent::Video { data, caption }
+                        }
+                        _ => SendContent::File {
+                            data,
+                            file_name,
+                            caption,
+                        },
+                    };
 
-                    match media_type {
-                        "image" => {
-                            match send_image_or_video(
-                                &bot,
-                                &auth,
-                                &msg,
-                                data,
-                                1,
-                                caption,
-                                file_path,
-                                file_size,
-                            )
-                            .await
-                            {
-                                Ok(()) => {}
-                                Err(e) => {
-                                    let err_text =
-                                        format!("发送图片 {} 失败：{}", file_path, e);
-                                    drop(e); // 确保在 .await 前释放 e
-                                    eprintln!("← Error: {}", err_text);
-                                    bot.reply(&msg, &err_text).await?;
-                                }
-                            }
+                    match bot.reply_media(&msg, content).await {
+                        Ok(_) => {
+                            println!(
+                                "← Sent file: {} ({} bytes)",
+                                file_path, file_size
+                            );
                         }
-                        "video" => {
-                            match send_image_or_video(
-                                &bot,
-                                &auth,
-                                &msg,
-                                data,
-                                2,
-                                caption,
-                                file_path,
-                                file_size,
-                            )
-                            .await
-                            {
-                                Ok(()) => {}
-                                Err(e) => {
-                                    let err_text =
-                                        format!("发送视频 {} 失败：{}", file_path, e);
-                                    drop(e);
-                                    eprintln!("← Error: {}", err_text);
-                                    bot.reply(&msg, &err_text).await?;
-                                }
-                            }
-                        }
-                        _ => {
-                            let content = SendContent::File {
-                                data,
-                                file_name: file_name.clone(),
-                                caption,
-                            };
-                            match bot.reply_media(&msg, content).await {
-                                Ok(_) => {
-                                    println!("← Sent file: {} ({} bytes)", file_path, file_size);
-                                }
-                                Err(e) => {
-                                    let err_text = format!("发送文件 {} 失败：{}", file_path, e);
-                                    eprintln!("← Error: {}", err_text);
-                                    bot.reply(&msg, &err_text).await?;
-                                }
-                            }
+                        Err(e) => {
+                            let error_text =
+                                format!("发送文件 {} 失败：{}", file_path, e);
+                            eprintln!("← Error: {}", error_text);
+                            bot.reply(&msg, &error_text).await?;
                         }
                     }
                 }
@@ -288,59 +248,6 @@ async fn handle_message(
         println!("← Replied: {}", reply_text);
     }
 
-    Ok(())
-}
-
-async fn send_image_or_video(
-    bot: &WeChatBot,
-    auth: &(String, String),
-    msg: &IncomingMessage,
-    data: Vec<u8>,
-    media_type_i32: i32,
-    caption: Option<String>,
-    file_path: &str,
-    file_size: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let upload_result = bot.upload(&data, &msg.user_id, media_type_i32).await?;
-
-    let mut items: Vec<serde_json::Value> = Vec::new();
-    if let Some(cap) = caption {
-        items.push(serde_json::json!({"type": 1, "text_item": {"text": cap}}));
-    }
-
-    let media_json = serde_json::json!({
-        "encrypt_query_param": upload_result.media.encrypt_query_param,
-        "aes_key": upload_result.media.aes_key,
-        "encrypt_type": 1,
-    });
-
-    if media_type_i32 == 1 {
-        let aeskey_hex = encode_aes_key_hex(&upload_result.aes_key);
-        items.push(serde_json::json!({
-            "type": 2,
-            "image_item": {
-                "media": media_json,
-                "mid_size": upload_result.encrypted_file_size,
-                "aeskey": aeskey_hex
-            }
-        }));
-    } else {
-        items.push(serde_json::json!({
-            "type": 5,
-            "video_item": {
-                "media": media_json,
-                "video_size": upload_result.encrypted_file_size,
-                "play_length": 0
-            }
-        }));
-    }
-
-    let payload = build_media_message(&msg.user_id, &msg.context_token(), items);
-    let ilink_client = ILinkClient::new();
-    ilink_client.send_message(&auth.0, &auth.1, &payload).await?;
-
-    let type_label = if media_type_i32 == 1 { "image" } else { "video" };
-    println!("← Sent {}: {} ({} bytes)", type_label, file_path, file_size);
     Ok(())
 }
 
