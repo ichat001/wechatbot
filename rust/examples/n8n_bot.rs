@@ -86,12 +86,7 @@ async fn handle_message(
                 let base_dir = Path::new(&home).join(".n8n").join("www").join(&msg.user_id);
                 fs::create_dir_all(&base_dir).await?;
 
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis();
-                let safe_file_name = format!("n8n-{}-{}", timestamp, file_name);
-                let file_path = base_dir.join(&safe_file_name);
+                let file_path = base_dir.join(&file_name);
 
                 let mut file = fs::File::create(&file_path).await?;
                 file.write_all(&media.data).await?;
