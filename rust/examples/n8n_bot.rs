@@ -1,9 +1,10 @@
 // examples/n8n_bot.rs
 // n8n Bot — Rust 版本，连接 wechatbot 与 n8n webhook
 
+use std::env;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tempfile::Builder;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use wechatbot::{
@@ -74,24 +75,30 @@ async fn handle_message(
                     ContentType::Video => (".mp4", "video"),
                     _ => ("", "file"),
                 };
-
                 let file_name = media.file_name.as_deref().unwrap_or(ext).to_string();
 
-                // 创建临时文件并持久化
-                let tmp = Builder::new()
-                    .prefix("n8n-")
-                    .suffix(&format!("-{}", file_name))
-                    .tempfile()?;
+                // 保存到用户目录下的 .n8n/www/<userId> 目录
+                let home = if cfg!(windows) {
+                    env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string())
+                } else {
+                    env::var("HOME").unwrap_or_else(|_| ".".to_string())
+                };
+                let base_dir = Path::new(&home).join(".n8n").join("www").join(&msg.user_id);
+                fs::create_dir_all(&base_dir).await?;
 
-                let path = tmp.path().to_path_buf();
-                let mut file = fs::File::create(&path).await?;
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                let safe_file_name = format!("n8n-{}-{}", timestamp, file_name);
+                let file_path = base_dir.join(&safe_file_name);
+
+                let mut file = fs::File::create(&file_path).await?;
                 file.write_all(&media.data).await?;
                 file.sync_all().await?;
 
-                // keep() 返回 (File, PathBuf)，保留 File 句柄以保持文件存在
-                let (_file, path_buf) = tmp.keep()?;
-                let path_str = path_buf.to_string_lossy().to_string();
-
+                // 转换为正斜杠路径
+                let path_str = file_path.to_string_lossy().replace("\\", "/");
                 payload["message"]["mediaPath"] = serde_json::json!(path_str);
                 payload["message"]["mediaType"] = serde_json::json!(media_type);
                 payload["message"]["mediaSize"] = serde_json::json!(media.data.len());
@@ -129,44 +136,67 @@ async fn handle_message(
 
     let result: serde_json::Value = response.json().await?;
 
-    // 5. 根据 n8n 回复发送消息
-    if let Some(file_path) = result["filePath"].as_str() {
-        let file_path = file_path.to_string();
-        let file_name = result["fileName"]
-            .as_str()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                std::path::Path::new(&file_path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("file")
-                    .to_string()
-            });
+    // AI Agent 输出为数组，取第一个元素
+    let output_obj = if let Some(arr) = result.as_array() {
+        arr.first().cloned().unwrap_or_default()
+    } else {
+        result.clone()
+    };
+    let output_text = output_obj["output"].as_str().unwrap_or("").to_string();
 
-        match fs::read(&file_path).await {
-            Ok(data) => {
-                bot.reply_media(
-                    &msg,
-                    SendContent::File {
-                        data,
-                        file_name,
-                        caption: None,
-                    },
-                )
-                .await?;
-                println!("← Sent file: {}", file_path);
-            }
-            Err(e) => {
-                let error_text = format!("发送文件失败：{}", e);
-                bot.reply(&msg, &error_text).await?;
-                println!("← Error: {}", error_text);
+    // 解析 FILE: 指令
+    let mut files_to_send: Vec<String> = Vec::new();
+    let mut reply_text = String::new();
+
+    if let Some(first_line) = output_text.lines().next() {
+        if let Some(paths_str) = first_line.strip_prefix("FILE:") {
+            files_to_send = paths_str
+                .split(';')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let remaining: Vec<&str> = output_text.lines().skip(1).collect();
+            reply_text = remaining.join("\n");
+        } else {
+            reply_text = output_text;
+        }
+    } else {
+        reply_text = output_text;
+    }
+
+    // 5. 根据解析结果发送消息
+    if !files_to_send.is_empty() {
+        for (i, file_path) in files_to_send.iter().enumerate() {
+            match fs::read(&file_path).await {
+                Ok(data) => {
+                    let caption = if i == files_to_send.len() - 1 && !reply_text.is_empty() {
+                        Some(reply_text.clone())
+                    } else {
+                        None
+                    };
+                    bot.reply_media(
+                        &msg,
+                        SendContent::File {
+                            data,
+                            file_name: Path::new(file_path)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("file")
+                                .to_string(),
+                            caption,
+                        },
+                    )
+                    .await?;
+                    println!("← Sent file: {}", file_path);
+                }
+                Err(e) => {
+                    let error_text = format!("发送文件 {} 失败：{}", file_path, e);
+                    bot.reply(&msg, &error_text).await?;
+                    println!("← Error: {}", error_text);
+                }
             }
         }
     } else {
-        let reply_text = result["reply"]
-            .as_str()
-            .unwrap_or("n8n 未返回有效回复")
-            .to_string();
         bot.reply(&msg, &reply_text).await?;
         println!("← Replied: {}", reply_text);
     }
