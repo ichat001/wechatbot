@@ -8,9 +8,9 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use wechatbot::{
-    BotOptions, ContentType, IncomingMessage, SendContent, WeChatBot,
-    protocol::{ILinkClient, build_media_message},
     crypto::encode_aes_key_hex,
+    protocol::{build_media_message, ILinkClient},
+    BotOptions, ContentType, IncomingMessage, SendContent, WeChatBot,
 };
 
 const N8N_WEBHOOK_URL: &str = "http://localhost:5678/webhook/wechat-bot";
@@ -35,7 +35,7 @@ async fn main() {
     let creds = bot.login(false).await.expect("登录失败");
     println!("Logged in: {} ({})", creds.account_id, creds.user_id);
 
-    // 保存 base_url 和 token，供后续自定义媒体发送使用
+    // 保存 base_url 和 token 供自定义媒体发送使用
     let auth = Arc::new((creds.base_url.clone(), creds.token.clone()));
 
     let bot_for_handler = Arc::clone(&bot);
@@ -229,13 +229,12 @@ async fn handle_message(
 
                     match media_type {
                         "image" => {
-                            // 图片：使用自定义发送，补充 aeskey 字段
                             if let Err(e) = send_image_or_video(
                                 &bot,
                                 &auth,
                                 &msg,
                                 data,
-                                1, // media_type: 1 = image
+                                1, // 1 = image
                                 caption,
                                 file_path,
                                 file_size,
@@ -248,13 +247,12 @@ async fn handle_message(
                             }
                         }
                         "video" => {
-                            // 视频：同样使用自定义发送
                             if let Err(e) = send_image_or_video(
                                 &bot,
                                 &auth,
                                 &msg,
                                 data,
-                                2, // media_type: 2 = video
+                                2, // 2 = video
                                 caption,
                                 file_path,
                                 file_size,
@@ -350,8 +348,8 @@ async fn send_image_or_video(
         }));
     }
 
-    // 3. 构建并发送消息
-    let payload = build_media_message(&msg.user_id, &msg.context_token, items);
+    // 3. 构建并发送消息（context_token 是方法，需加括号调用）
+    let payload = build_media_message(&msg.user_id, &msg.context_token(), items);
     let ilink_client = ILinkClient::new();
     ilink_client.send_message(&auth.0, &auth.1, &payload).await?;
 
