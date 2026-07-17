@@ -9,6 +9,8 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use wechatbot::{
     BotOptions, ContentType, IncomingMessage, SendContent, WeChatBot,
+    protocol::{ILinkClient, build_media_message},
+    crypto::encode_aes_key_hex,
 };
 
 const N8N_WEBHOOK_URL: &str = "http://localhost:5678/webhook/wechat-bot";
@@ -16,7 +18,9 @@ const N8N_TIMEOUT_MS: u64 = 120_000; // 2 分钟
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
 
     let bot = Arc::new(WeChatBot::new(BotOptions {
         on_qr_url: Some(Box::new(|url| {
@@ -31,12 +35,16 @@ async fn main() {
     let creds = bot.login(false).await.expect("登录失败");
     println!("Logged in: {} ({})", creds.account_id, creds.user_id);
 
+    // 保存 base_url 和 token，供后续自定义媒体发送使用
+    let auth = Arc::new((creds.base_url.clone(), creds.token.clone()));
+
     let bot_for_handler = Arc::clone(&bot);
     bot.on_message(Box::new(move |msg| {
         let bot = Arc::clone(&bot_for_handler);
+        let auth = Arc::clone(&auth);
         let msg = msg.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_message(bot, msg).await {
+            if let Err(e) = handle_message(bot, auth, msg).await {
                 eprintln!("处理消息出错: {}", e);
             }
         });
@@ -47,7 +55,7 @@ async fn main() {
     bot.run().await.expect("运行失败");
 }
 
-/// 根据文件扩展名返回媒体类型，规则与库内部的 `categorize_by_extension` 完全一致。
+/// 根据文件扩展名返回媒体类型，与库内 `categorize_by_extension` 一致。
 fn media_type_from_path(path: &Path) -> &'static str {
     let ext = path
         .extension()
@@ -63,6 +71,7 @@ fn media_type_from_path(path: &Path) -> &'static str {
 
 async fn handle_message(
     bot: Arc<WeChatBot>,
+    auth: Arc<(String, String)>,
     msg: IncomingMessage,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. 发送 "正在输入" 状态
@@ -215,34 +224,67 @@ async fn handle_message(
                         None
                     };
 
-                    // === 修改开始：根据扩展名显式构造对应的 SendContent ===
+                    // === 根据扩展名采用不同的发送策略 ===
                     let media_type = media_type_from_path(path);
 
-                    let content = match media_type {
-                        "image" => SendContent::Image { data, caption },
-                        "video" => SendContent::Video { data, caption },
-                        _ => SendContent::File {
-                            data,
-                            file_name: file_name.clone(),
-                            caption,
-                        },
-                    };
-
-                    match bot.reply_media(&msg, content).await {
-                        Ok(_) => {
-                            println!(
-                                "← Sent {}: {} ({} bytes)",
-                                media_type, file_path, file_size
-                            );
+                    match media_type {
+                        "image" => {
+                            // 图片：使用自定义发送，补充 aeskey 字段
+                            if let Err(e) = send_image_or_video(
+                                &bot,
+                                &auth,
+                                &msg,
+                                data,
+                                1, // media_type: 1 = image
+                                caption,
+                                file_path,
+                                file_size,
+                            )
+                            .await
+                            {
+                                let err_text = format!("发送图片 {} 失败：{}", file_path, e);
+                                eprintln!("← Error: {}", err_text);
+                                bot.reply(&msg, &err_text).await?;
+                            }
                         }
-                        Err(e) => {
-                            let error_text =
-                                format!("发送{} {} 失败：{}", media_type, file_path, e);
-                            eprintln!("← Error: {}", error_text);
-                            bot.reply(&msg, &error_text).await?;
+                        "video" => {
+                            // 视频：同样使用自定义发送
+                            if let Err(e) = send_image_or_video(
+                                &bot,
+                                &auth,
+                                &msg,
+                                data,
+                                2, // media_type: 2 = video
+                                caption,
+                                file_path,
+                                file_size,
+                            )
+                            .await
+                            {
+                                let err_text = format!("发送视频 {} 失败：{}", file_path, e);
+                                eprintln!("← Error: {}", err_text);
+                                bot.reply(&msg, &err_text).await?;
+                            }
+                        }
+                        _ => {
+                            // 普通文件：继续使用库自带的 reply_media
+                            let content = SendContent::File {
+                                data,
+                                file_name: file_name.clone(),
+                                caption,
+                            };
+                            match bot.reply_media(&msg, content).await {
+                                Ok(_) => {
+                                    println!("← Sent file: {} ({} bytes)", file_path, file_size);
+                                }
+                                Err(e) => {
+                                    let err_text = format!("发送文件 {} 失败：{}", file_path, e);
+                                    eprintln!("← Error: {}", err_text);
+                                    bot.reply(&msg, &err_text).await?;
+                                }
+                            }
                         }
                     }
-                    // === 修改结束 ===
                 }
                 Err(e) => {
                     let error_text = format!("读取文件 {} 失败：{}", file_path, e);
@@ -256,6 +298,65 @@ async fn handle_message(
         println!("← Replied: {}", reply_text);
     }
 
+    Ok(())
+}
+
+/// 自定义发送图片/视频，绕过库中缺失 `aeskey` 的问题。
+async fn send_image_or_video(
+    bot: &WeChatBot,
+    auth: &(String, String),
+    msg: &IncomingMessage,
+    data: Vec<u8>,
+    media_type_i32: i32, // 1: image, 2: video
+    caption: Option<String>,
+    file_path: &str,
+    file_size: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // 1. 上传媒体到 CDN，获取加密信息和密钥
+    let upload_result = bot.upload(&data, &msg.user_id, media_type_i32).await?;
+
+    // 2. 构建 item_list（可选的 caption 文本 + 媒体 item）
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    if let Some(cap) = caption {
+        items.push(serde_json::json!({"type": 1, "text_item": {"text": cap}}));
+    }
+
+    let media_json = serde_json::json!({
+        "encrypt_query_param": upload_result.media.encrypt_query_param,
+        "aes_key": upload_result.media.aes_key,
+        "encrypt_type": 1,
+    });
+
+    if media_type_i32 == 1 {
+        // 图片必须携带 aeskey（AES 密钥的 hex 字符串）
+        let aeskey_hex = encode_aes_key_hex(&upload_result.aes_key);
+        items.push(serde_json::json!({
+            "type": 2,
+            "image_item": {
+                "media": media_json,
+                "mid_size": upload_result.encrypted_file_size,
+                "aeskey": aeskey_hex
+            }
+        }));
+    } else {
+        // 视频：添加 play_length 占位，避免消息被拒绝
+        items.push(serde_json::json!({
+            "type": 5,
+            "video_item": {
+                "media": media_json,
+                "video_size": upload_result.encrypted_file_size,
+                "play_length": 0
+            }
+        }));
+    }
+
+    // 3. 构建并发送消息
+    let payload = build_media_message(&msg.user_id, &msg.context_token, items);
+    let ilink_client = ILinkClient::new();
+    ilink_client.send_message(&auth.0, &auth.1, &payload).await?;
+
+    let type_label = if media_type_i32 == 1 { "image" } else { "video" };
+    println!("← Sent {}: {} ({} bytes)", type_label, file_path, file_size);
     Ok(())
 }
 
