@@ -47,6 +47,20 @@ async fn main() {
     bot.run().await.expect("运行失败");
 }
 
+/// 根据文件扩展名返回媒体类型，规则与库内部的 `categorize_by_extension` 完全一致。
+fn media_type_from_path(path: &Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" => "image",
+        "mp4" | "mov" | "webm" | "mkv" | "avi" => "video",
+        _ => "file",
+    }
+}
+
 async fn handle_message(
     bot: Arc<WeChatBot>,
     msg: IncomingMessage,
@@ -201,27 +215,34 @@ async fn handle_message(
                         None
                     };
 
-                    // 注意：此处依赖修改后的 wechatbot 库，库内已将 SendContent::File 统一为普通文件发送
-                    let content = SendContent::File {
-                        data,
-                        file_name,
-                        caption,
+                    // === 修改开始：根据扩展名显式构造对应的 SendContent ===
+                    let media_type = media_type_from_path(path);
+
+                    let content = match media_type {
+                        "image" => SendContent::Image { data, caption },
+                        "video" => SendContent::Video { data, caption },
+                        _ => SendContent::File {
+                            data,
+                            file_name: file_name.clone(),
+                            caption,
+                        },
                     };
 
                     match bot.reply_media(&msg, content).await {
                         Ok(_) => {
                             println!(
-                                "← Sent file: {} ({} bytes)",
-                                file_path, file_size
+                                "← Sent {}: {} ({} bytes)",
+                                media_type, file_path, file_size
                             );
                         }
                         Err(e) => {
                             let error_text =
-                                format!("发送文件 {} 失败：{}", file_path, e);
+                                format!("发送{} {} 失败：{}", media_type, file_path, e);
                             eprintln!("← Error: {}", error_text);
                             bot.reply(&msg, &error_text).await?;
                         }
                     }
+                    // === 修改结束 ===
                 }
                 Err(e) => {
                     let error_text = format!("读取文件 {} 失败：{}", file_path, e);
