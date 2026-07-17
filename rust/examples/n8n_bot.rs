@@ -229,7 +229,7 @@ async fn handle_message(
 
                     match media_type {
                         "image" => {
-                            if let Err(e) = send_image_or_video(
+                            match send_image_or_video(
                                 &bot,
                                 &auth,
                                 &msg,
@@ -241,13 +241,16 @@ async fn handle_message(
                             )
                             .await
                             {
-                                let err_text = format!("发送图片 {} 失败：{}", file_path, e);
-                                eprintln!("← Error: {}", err_text);
-                                bot.reply(&msg, &err_text).await?;
+                                Ok(()) => {}
+                                Err(e) => {
+                                    let err_text = format!("发送图片 {} 失败：{}", file_path, e);
+                                    eprintln!("← Error: {}", err_text);
+                                    bot.reply(&msg, &err_text).await?;
+                                }
                             }
                         }
                         "video" => {
-                            if let Err(e) = send_image_or_video(
+                            match send_image_or_video(
                                 &bot,
                                 &auth,
                                 &msg,
@@ -259,9 +262,12 @@ async fn handle_message(
                             )
                             .await
                             {
-                                let err_text = format!("发送视频 {} 失败：{}", file_path, e);
-                                eprintln!("← Error: {}", err_text);
-                                bot.reply(&msg, &err_text).await?;
+                                Ok(()) => {}
+                                Err(e) => {
+                                    let err_text = format!("发送视频 {} 失败：{}", file_path, e);
+                                    eprintln!("← Error: {}", err_text);
+                                    bot.reply(&msg, &err_text).await?;
+                                }
                             }
                         }
                         _ => {
