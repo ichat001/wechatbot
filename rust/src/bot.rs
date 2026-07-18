@@ -571,12 +571,29 @@ impl WeChatBot {
         };
 
         let upload_resp = self.client.get_upload_url(base_url, token, &params).await?;
-        let upload_param = upload_resp.upload_param.ok_or_else(|| {
-            WeChatBotError::Media("getuploadurl did not return upload_param".into())
-        })?;
 
-        let upload_url =
-            protocol::build_cdn_upload_url(protocol::CDN_BASE_URL, &upload_param, &filekey);
+        // 优先使用服务器返回的完整上传 URL（与 Node.js 对齐）
+        let upload_url = if let Some(ref full_url) = upload_resp.upload_full_url {
+            if !full_url.trim().is_empty() {
+                full_url.clone()
+            } else {
+                // upload_full_url 为空字符串，回退到手动拼接
+                let upload_param = upload_resp.upload_param.ok_or_else(|| {
+                    WeChatBotError::Media(
+                        "getuploadurl returned no valid upload URL (both upload_full_url and upload_param are empty)".into(),
+                    )
+                })?;
+                protocol::build_cdn_upload_url(protocol::CDN_BASE_URL, &upload_param, &filekey)
+            }
+        } else {
+            // 没有 upload_full_url，必须使用 upload_param
+            let upload_param = upload_resp.upload_param.ok_or_else(|| {
+                WeChatBotError::Media(
+                    "getuploadurl did not return upload_full_url or upload_param".into(),
+                )
+            })?;
+            protocol::build_cdn_upload_url(protocol::CDN_BASE_URL, &upload_param, &filekey)
+        };
 
         let encrypted_file_size = ciphertext.len();
 
