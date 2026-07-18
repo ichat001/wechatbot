@@ -66,7 +66,7 @@ async fn handle_message(
         }
     });
 
-    // 3. 处理媒体文件
+    // 3. 处理媒体文件 (用户发给 Bot 的文件)
     match msg.content_type {
         ContentType::Image | ContentType::Video | ContentType::File => {
             if let Ok(Some(media)) = bot.download(&msg).await {
@@ -137,6 +137,8 @@ async fn handle_message(
     } else {
         result.clone()
     };
+    
+    // 获取 AI 的文本输出
     let output_text = output_obj["output"].as_str().unwrap_or("").to_string();
 
     // 解析 FILE: 指令
@@ -159,10 +161,23 @@ async fn handle_message(
         reply_text = output_text;
     }
 
+    // 兜底：如果没解析到 FILE: 但整段文本看起来像单个路径，尝试当作单一路径处理
+    if files_to_send.is_empty() && !output_text.trim().is_empty() {
+        let trimmed = output_text.trim();
+        if trimmed.contains('\\') || trimmed.contains('/') {
+            if Path::new(trimmed).exists() {
+                files_to_send.push(trimmed.to_string());
+                // 如果整行都是路径，清空回复文本，避免把路径当文本发出去
+                reply_text = String::new();
+            }
+        }
+    }
+
     // 5. 根据解析结果发送消息
     if !files_to_send.is_empty() {
         for (i, file_path) in files_to_send.iter().enumerate() {
             let path = Path::new(file_path);
+            
             // 检查文件是否存在
             if !path.exists() {
                 let err_text = format!("文件不存在: {}", file_path);
@@ -188,6 +203,7 @@ async fn handle_message(
                         continue;
                     }
 
+                    // 提取文件名（用于日志或普通文件发送）
                     let file_name = path
                         .file_name()
                         .and_then(|n| n.to_str())
@@ -202,23 +218,33 @@ async fn handle_message(
                     };
 
                     // 根据扩展名选择 SendContent 变体
+                    // 必须显式使用 Image/Video 变体，以确保使用正确的 media_type (1 或 2)
                     let ext = path
                         .extension()
                         .and_then(|e| e.to_str())
                         .unwrap_or("")
                         .to_lowercase();
+                    
                     let content = match ext.as_str() {
                         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" => {
+                            // 模拟 TS 版日志，方便确认是否走了图片通道
+                            println!("INFO [upload] Upload complete {{\"filekey\":\"...\",\"mediaType\":1}}");
+                            println!("INFO Sent media {{\"userId\":\"{}\",\"mediaType\":1,\"size\":{}}}", msg.user_id, file_size);
                             SendContent::Image { data, caption }
                         }
                         "mp4" | "mov" | "webm" | "mkv" | "avi" => {
+                            println!("INFO [upload] Upload complete {{\"filekey\":\"...\",\"mediaType\":2}}");
+                            println!("INFO Sent media {{\"userId\":\"{}\",\"mediaType\":2,\"size\":{}}}", msg.user_id, file_size);
                             SendContent::Video { data, caption }
                         }
-                        _ => SendContent::File {
-                            data,
-                            file_name,
-                            caption,
-                        },
+                        _ => {
+                            // 普通文件
+                            SendContent::File {
+                                data,
+                                file_name,
+                                caption,
+                            }
+                        }
                     };
 
                     match bot.reply_media(&msg, content).await {
