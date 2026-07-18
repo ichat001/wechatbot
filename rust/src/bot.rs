@@ -468,7 +468,6 @@ impl WeChatBot {
             match content {
                 SendContent::Text(text) => self.send_text(user_id, &text, context_token).await,
                 SendContent::Image { data, caption } => {
-                    let raw_size = data.len();
                     let result = self
                         .cdn_upload(&base_url, &token, &data, user_id, 1)
                         .await?;
@@ -478,13 +477,12 @@ impl WeChatBot {
                     }
                     items.push(json!({"type": 2, "image_item": {
                         "media": cdn_media_json(&result.media),
-                        "mid_size": raw_size,
+                        "mid_size": result.encrypted_file_size,
                     }}));
                     let msg = protocol::build_media_message(user_id, context_token, items);
                     self.client.send_message(&base_url, &token, &msg).await
                 }
                 SendContent::Video { data, caption } => {
-                    let raw_size = data.len();
                     let result = self
                         .cdn_upload(&base_url, &token, &data, user_id, 2)
                         .await?;
@@ -494,7 +492,7 @@ impl WeChatBot {
                     }
                     items.push(json!({"type": 5, "video_item": {
                         "media": cdn_media_json(&result.media),
-                        "video_size": raw_size,
+                        "video_size": result.encrypted_file_size,
                     }}));
                     let msg = protocol::build_media_message(user_id, context_token, items);
                     self.client.send_message(&base_url, &token, &msg).await
