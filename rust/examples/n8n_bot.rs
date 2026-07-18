@@ -1,5 +1,5 @@
 // examples/n8n_bot.rs
-// n8n Bot — Rust 版本5，连接 wechatbot 与 n8n webhook
+// n8n Bot — Rust 版本，连接 wechatbot 与 n8n webhook
 
 use std::env;
 use std::path::Path;
@@ -66,7 +66,7 @@ async fn handle_message(
             "userId": msg.user_id,
             "text": msg.text,
             "type": content_type_str(&msg.content_type),
-            "timestamp": timestamp_millis,   // 使用已计算的值
+            "timestamp": timestamp_millis,
         }
     });
 
@@ -80,14 +80,12 @@ async fn handle_message(
                     _ => ("", "file"),
                 };
 
-                // --- 修改: 保留原文件名，若不存在则用 <类型>_<时间戳>.<扩展名> ---
                 let file_name = if let Some(original) = &media.file_name {
                     original.clone()
                 } else {
                     format!("{}_{}{}", media_type, timestamp_millis, ext)
                 };
 
-                // 保存到用户目录下的 .n8n/www/<userId> 目录
                 let home = if cfg!(windows) {
                     env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string())
                 } else {
@@ -102,7 +100,6 @@ async fn handle_message(
                 file.write_all(&media.data).await?;
                 file.sync_all().await?;
 
-                // 转换为正斜杠路径
                 let path_str = file_path.to_string_lossy().replace("\\", "/");
                 payload["message"]["mediaPath"] = serde_json::json!(path_str);
                 payload["message"]["mediaType"] = serde_json::json!(media_type);
@@ -186,34 +183,35 @@ async fn handle_message(
                         .unwrap_or("")
                         .to_lowercase();
 
-                    // 根据扩展名选择消息类型
                     match ext.as_str() {
                         "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" => {
-                            // 图片消息
-                            bot.reply_media(&msg, SendContent::Image(data)).await?;
+                            // 图片消息（命名字段结构体）
+                            bot.reply_media(&msg, SendContent::Image {
+                                data,
+                                caption: None,   // 图片不支持直接附带文本，稍后单独发送
+                            }).await?;
                             println!("← Sent image: {}", file_path);
                         }
                         "mp4" | "mov" | "avi" => {
                             // 视频消息
-                            bot.reply_media(&msg, SendContent::Video(data)).await?;
+                            bot.reply_media(&msg, SendContent::Video {
+                                data,
+                                caption: None,
+                            }).await?;
                             println!("← Sent video: {}", file_path);
                         }
                         _ => {
-                            // 普通文件（最后一个带 caption）
+                            // 普通文件
                             let caption = if i == count - 1 && !reply_text.is_empty() {
                                 Some(reply_text.clone())
                             } else {
                                 None
                             };
-                            bot.reply_media(
-                                &msg,
-                                SendContent::File {
-                                    data,
-                                    file_name: file_name.to_string(),
-                                    caption,
-                                },
-                            )
-                            .await?;
+                            bot.reply_media(&msg, SendContent::File {
+                                data,
+                                file_name: file_name.to_string(),
+                                caption,
+                            }).await?;
                             println!("← Sent file: {}", file_path);
                         }
                     }
