@@ -1,10 +1,10 @@
-name: Build Windows EXE (with version)
+name: Build Windows EXE (with version, China time)
 
 on:
   workflow_dispatch:
 
 permissions:
-  contents: write          # 允许创建 Release 和推送 tag
+  contents: write
 
 jobs:
   build:
@@ -24,33 +24,39 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
-      # ---------- 生成动态版本号，写入环境变量 ----------
-      - name: Set version from timestamp
+      # ---------- 生成版本号（北京时间）----------
+      - name: Set version from Beijing time
         shell: pwsh
         run: |
-          $now = Get-Date
-          $major = ($now.Year % 100).ToString()          # 年份后两位，如 26
-          $minor = $now.Month.ToString("00")             # 月，如 07
-          $build = $now.Day.ToString("00")               # 日，如 18
-          $revision = ($now.Hour * 100 + $now.Minute).ToString()   # 时分，如 1430
+          # 转换为北京时间
+          $tz = [System.TimeZoneInfo]::FindSystemTimeZoneById("China Standard Time")
+          $now = [System.TimeZoneInfo]::ConvertTimeFromUtc((Get-Date).ToUniversalTime(), $tz)
+
+          $major = ($now.Year % 100).ToString()
+          $minor = $now.Month.ToString("00")
+          $build = $now.Day.ToString("00")
+          $revision = ($now.Hour * 100 + $now.Minute).ToString()
 
           echo "APP_VERSION_MAJOR=$major" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "APP_VERSION_MINOR=$minor" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "APP_VERSION_BUILD=$build" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "APP_VERSION_REVISION=$revision" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          Write-Host "📦 Version will be: $major.$minor.$build.$revision"
+          Write-Host "📦 Beijing version: $major.$minor.$build.$revision"
 
-      # ---------- 编译（build.rs 会自动读取上面的环境变量）----------
+      # ---------- 编译 ----------
       - name: Build n8n_bot
         run: cargo build --release --example n8n_bot
 
-      # ---------- 生成 Release 标签和名称（保留原有风格）----------
-      - name: Generate timestamp tag and release name
+      # ---------- 生成 Release 标签（北京时间）----------
+      - name: Generate tag and release name (Beijing time)
         id: vars
         shell: pwsh
         run: |
-          $ts = Get-Date -Format "yyyyMMdd-HHmmss"
+          $tz = [System.TimeZoneInfo]::FindSystemTimeZoneById("China Standard Time")
+          $now = [System.TimeZoneInfo]::ConvertTimeFromUtc((Get-Date).ToUniversalTime(), $tz)
+          $ts = $now.ToString("yyyyMMdd-HHmmss")
+
           echo "tag=n8n-bot-$ts" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           echo "name=n8n_bot $ts" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
