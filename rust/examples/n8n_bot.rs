@@ -143,7 +143,8 @@ async fn handle_message(
 
     // 解析 FILE: 指令
     let mut files_to_send: Vec<String> = Vec::new();
-    let mut reply_text = String::new();
+    // 修复1：仅声明，不初始化，避免警告
+    let mut reply_text: String; 
 
     if let Some(first_line) = output_text.lines().next() {
         if let Some(paths_str) = first_line.strip_prefix("FILE:") {
@@ -155,10 +156,11 @@ async fn handle_message(
             let remaining: Vec<&str> = output_text.lines().skip(1).collect();
             reply_text = remaining.join("\n");
         } else {
-            reply_text = output_text;
+            // 修复2：clone() 以保留 output_text 的所有权供后续使用
+            reply_text = output_text.clone();
         }
     } else {
-        reply_text = output_text;
+        reply_text = output_text.clone();
     }
 
     // 兜底：如果没解析到 FILE: 但整段文本看起来像单个路径，尝试当作单一路径处理
