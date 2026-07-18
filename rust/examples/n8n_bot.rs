@@ -1,5 +1,6 @@
 // examples/n8n_bot.rs
-// n8n Bot — Rust 版本，连接 wechatbot 与 n8n webhook
+// n8n Bot — Rust 版本6，连接 wechatbot 与 n8n webhook
+// https://chat.deepseek.com/a/chat/s/3f0eb79e-7029-4877-9c95-90af65240239
 
 use std::env;
 use std::path::Path;
@@ -10,6 +11,7 @@ use tokio::io::AsyncWriteExt;
 use wechatbot::{
     BotOptions, ContentType, IncomingMessage, SendContent, WeChatBot,
 };
+use chrono::DateTime; // 新增：用于时间格式化
 
 const N8N_WEBHOOK_URL: &str = "http://localhost:5678/webhook/wechat-bot";
 const N8N_TIMEOUT_MS: u64 = 120_000; // 2 分钟
@@ -80,10 +82,22 @@ async fn handle_message(
                     _ => ("", "file"),
                 };
 
+                // 修改: 将时间戳格式化为 年月日时分秒 用作文件名
+                let time_str = {
+                    let secs = msg
+                        .timestamp
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let datetime = DateTime::from_timestamp(secs as i64, 0)
+                        .unwrap_or_default();
+                    datetime.format("%Y%m%d%H%M%S").to_string()
+                };
+
                 let file_name = if let Some(original) = &media.file_name {
                     original.clone()
                 } else {
-                    format!("{}_{}{}", media_type, timestamp_millis, ext)
+                    format!("{}_{}{}", media_type, time_str, ext)
                 };
 
                 let home = if cfg!(windows) {
