@@ -1,5 +1,5 @@
 // examples/n8n_bot.rs
-// n8n Bot — Rust 版本，连接 wechatbot 与 n8n webhook
+// n8n Bot — Rust 版本5，连接 wechatbot 与 n8n webhook
 
 use std::env;
 use std::path::Path;
@@ -171,34 +171,73 @@ async fn handle_message(
 
     // 5. 根据解析结果发送消息
     if !files_to_send.is_empty() {
+        let count = files_to_send.len();
+
         for (i, file_path) in files_to_send.iter().enumerate() {
             match fs::read(&file_path).await {
                 Ok(data) => {
-                    let caption = if i == files_to_send.len() - 1 && !reply_text.is_empty() {
-                        Some(reply_text.clone())
-                    } else {
-                        None
-                    };
-                    bot.reply_media(
-                        &msg,
-                        SendContent::File {
-                            data,
-                            file_name: Path::new(file_path)
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("file")
-                                .to_string(),
-                            caption,
-                        },
-                    )
-                    .await?;
-                    println!("← Sent file: {}", file_path);
+                    let file_name = Path::new(file_path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("file");
+                    let ext = Path::new(file_path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+
+                    // 根据扩展名选择消息类型
+                    match ext.as_str() {
+                        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" => {
+                            // 图片消息
+                            bot.reply_media(&msg, SendContent::Image(data)).await?;
+                            println!("← Sent image: {}", file_path);
+                        }
+                        "mp4" | "mov" | "avi" => {
+                            // 视频消息
+                            bot.reply_media(&msg, SendContent::Video(data)).await?;
+                            println!("← Sent video: {}", file_path);
+                        }
+                        _ => {
+                            // 普通文件（最后一个带 caption）
+                            let caption = if i == count - 1 && !reply_text.is_empty() {
+                                Some(reply_text.clone())
+                            } else {
+                                None
+                            };
+                            bot.reply_media(
+                                &msg,
+                                SendContent::File {
+                                    data,
+                                    file_name: file_name.to_string(),
+                                    caption,
+                                },
+                            )
+                            .await?;
+                            println!("← Sent file: {}", file_path);
+                        }
+                    }
                 }
                 Err(e) => {
                     let error_text = format!("发送文件 {} 失败：{}", file_path, e);
                     bot.reply(&msg, &error_text).await?;
                     println!("← Error: {}", error_text);
                 }
+            }
+        }
+
+        // 如果最后一个是图片/视频且需要附带文本，单独发送一条文本消息
+        if !reply_text.is_empty() {
+            let last_ext = files_to_send
+                .last()
+                .and_then(|p| Path::new(p).extension())
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let media_exts = ["jpg", "jpeg", "png", "gif", "bmp", "webp", "mp4", "mov", "avi"];
+            if media_exts.contains(&last_ext.as_str()) {
+                bot.reply(&msg, &reply_text).await?;
+                println!("← Text after media: {}", reply_text);
             }
         }
     } else {
