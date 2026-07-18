@@ -54,15 +54,19 @@ async fn handle_message(
     // 1. 发送 "正在输入" 状态
     let _ = bot.send_typing(&msg.user_id).await;
 
+    // --- 修改: 提前计算时间戳（毫秒）供文件名和 payload 共用 ---
+    let timestamp_millis = msg
+        .timestamp
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis() as u64;
+
     // 2. 构建 payload
     let mut payload = serde_json::json!({
         "message": {
             "userId": msg.user_id,
             "text": msg.text,
             "type": content_type_str(&msg.content_type),
-            "timestamp": msg.timestamp
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_millis() as u64,
+            "timestamp": timestamp_millis,   // 使用已计算的值
         }
     });
 
@@ -75,7 +79,13 @@ async fn handle_message(
                     ContentType::Video => (".mp4", "video"),
                     _ => ("", "file"),
                 };
-                let file_name = media.file_name.as_deref().unwrap_or(ext).to_string();
+
+                // --- 修改: 保留原文件名，若不存在则用 <类型>_<时间戳>.<扩展名> ---
+                let file_name = if let Some(original) = &media.file_name {
+                    original.clone()
+                } else {
+                    format!("{}_{}{}", media_type, timestamp_millis, ext)
+                };
 
                 // 保存到用户目录下的 .n8n/www/<userId> 目录
                 let home = if cfg!(windows) {
