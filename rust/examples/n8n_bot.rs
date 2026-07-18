@@ -91,7 +91,8 @@ async fn handle_message(
                         .as_secs();
                     let datetime = DateTime::from_timestamp(secs as i64, 0)
                         .unwrap_or_default();
-                    datetime.format("%Y%m%d%H%M%S").to_string()
+                    let local = datetime.with_timezone(&chrono::Local);
+                    local.format("%Y%m%d%H%M%S").to_string()
                 };
 
                 let file_name = if let Some(original) = &media.file_name {
