@@ -1,8 +1,7 @@
 //! Main WeChatBot client.
 
 use std::collections::HashMap;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Duration};
@@ -106,10 +105,12 @@ impl WeChatBot {
         }
     }
 
-    // --- QR login flow (unchanged) ---
+    /// Maximum number of QR code refresh attempts before giving up.
     const MAX_QR_REFRESH: u32 = 3;
+    /// Fixed API base URL for QR code requests.
     const FIXED_QR_BASE_URL: &'static str = "https://ilinkai.weixin.qq.com";
 
+    /// Login via QR code. Returns credentials on success.
     pub async fn login(&self, force: bool) -> Result<Credentials> {
         let base_url = self.base_url.read().await.clone();
 
@@ -123,12 +124,15 @@ impl WeChatBot {
             }
         }
 
+        // Send known local tokens so the server can answer `binded_redirect`
+        // instead of issuing a duplicate session for an already-bound bot.
         let local_token_list: Vec<String> = stored
             .as_ref()
             .filter(|c| !c.token.is_empty())
             .map(|c| vec![c.token.clone()])
             .unwrap_or_default();
 
+        // QR code login flow
         let mut qr_refresh_count = 0u32;
         loop {
             qr_refresh_count += 1;
@@ -152,6 +156,7 @@ impl WeChatBot {
 
             let mut last_status = String::new();
             let mut current_poll_base_url = Self::FIXED_QR_BASE_URL.to_string();
+            // Pairing code awaiting server verification (pair-code login flow)
             let mut pending_verify_code: Option<String> = None;
             loop {
                 let status = self
@@ -167,6 +172,8 @@ impl WeChatBot {
                     last_status = status.status.clone();
                     match status.status.as_str() {
                         "scaned" => {
+                            // A pending pairing code that leads back to
+                            // `scaned` was accepted
                             pending_verify_code = None;
                             info!("QR scanned — confirm in WeChat");
                         }
@@ -176,6 +183,7 @@ impl WeChatBot {
                     }
                 }
 
+                // Pair-code challenge: ask the user for the digits shown in WeChat
                 if status.status == "need_verifycode" {
                     let is_retry = pending_verify_code.is_some();
                     let code = match self.on_verify_code {
@@ -183,12 +191,14 @@ impl WeChatBot {
                         None => read_verify_code_from_stdin(is_retry).await?,
                     };
                     pending_verify_code = Some(code);
-                    continue;
+                    continue; // Re-poll immediately with the code attached
                 }
 
+                // Too many wrong pairing codes: server blocked this QR — get a new
+                // one (the fresh QR loop re-initializes pending_verify_code)
                 if status.status == "verify_code_blocked" {
                     warn!("Pairing code blocked after repeated mismatches — requesting new QR");
-                    break;
+                    break; // Outer loop requests a new QR (counts toward refresh limit)
                 }
 
                 if status.status == "confirmed" {
@@ -208,6 +218,7 @@ impl WeChatBot {
                     return Ok(creds);
                 }
 
+                // Already bound to this client: reuse existing local credentials
                 if status.status == "binded_redirect" {
                     if let Some(creds) = stored.clone() {
                         info!("Bot already bound — reusing stored credentials");
@@ -222,6 +233,7 @@ impl WeChatBot {
                     ));
                 }
 
+                // Handle IDC redirect
                 if status.status == "scaned_but_redirect" {
                     if let Some(ref host) = status.redirect_host {
                         current_poll_base_url = format!("https://{}", host);
@@ -242,10 +254,12 @@ impl WeChatBot {
         }
     }
 
+    /// Register a message handler.
     pub async fn on_message(&self, handler: MessageHandler) {
         self.handlers.lock().await.push(handler);
     }
 
+    /// Reply to an incoming message.
     pub async fn reply(&self, msg: &IncomingMessage, text: &str) -> Result<()> {
         self.context_tokens
             .write()
@@ -254,12 +268,14 @@ impl WeChatBot {
         self.send_text(&msg.user_id, text, &msg.context_token).await
     }
 
+    /// Send text to a user (needs prior context_token).
     pub async fn send(&self, user_id: &str, text: &str) -> Result<()> {
         let ct = self.context_tokens.read().await.get(user_id).cloned();
         let ct = ct.ok_or_else(|| WeChatBotError::NoContext(user_id.to_string()))?;
         self.send_text(user_id, text, &ct).await
     }
 
+    /// Show "typing..." indicator.
     pub async fn send_typing(&self, user_id: &str) -> Result<()> {
         let ct = self.context_tokens.read().await.get(user_id).cloned();
         let ct = ct.ok_or_else(|| WeChatBotError::NoContext(user_id.to_string()))?;
@@ -276,6 +292,7 @@ impl WeChatBot {
         Ok(())
     }
 
+    /// Reply with media content (image, video, or file).
     pub async fn reply_media(&self, msg: &IncomingMessage, content: SendContent) -> Result<()> {
         self.context_tokens
             .write()
@@ -285,12 +302,15 @@ impl WeChatBot {
             .await
     }
 
+    /// Send any content type to a user (needs prior context_token).
     pub async fn send_media(&self, user_id: &str, content: SendContent) -> Result<()> {
         let ct = self.context_tokens.read().await.get(user_id).cloned();
         let ct = ct.ok_or_else(|| WeChatBotError::NoContext(user_id.to_string()))?;
         self.send_content(user_id, &ct, content).await
     }
 
+    /// Download media from an incoming message.
+    /// Returns None if the message has no media. Priority: image > file > video > voice.
     pub async fn download(&self, msg: &IncomingMessage) -> Result<Option<DownloadedMedia>> {
         if let Some(img) = msg.images.first() {
             if let Some(ref media) = img.media {
@@ -339,6 +359,7 @@ impl WeChatBot {
         Ok(None)
     }
 
+    /// Download and decrypt a raw CDN media reference.
     pub async fn download_raw(
         &self,
         media: &CDNMedia,
@@ -347,6 +368,7 @@ impl WeChatBot {
         self.cdn.download(media, aeskey_override).await
     }
 
+    /// Upload data to WeChat CDN without sending a message.
     pub async fn upload(
         &self,
         data: &[u8],
@@ -358,9 +380,11 @@ impl WeChatBot {
             .await
     }
 
+    /// Start the long-poll loop. Blocks until stopped.
     pub async fn run(&self) -> Result<()> {
         *self.stopped.write().await = false;
 
+        // Tell the server we're coming online (non-fatal)
         {
             let (base_url, token) = self.get_auth().await?;
             if let Err(e) = self.client.notify_start(&base_url, &token).await {
@@ -414,6 +438,8 @@ impl WeChatBot {
             }
         }
 
+        // Tell the server we're going offline (non-fatal).
+        // Credentials may have rotated after a mid-poll re-login, so re-read them.
         if let Ok((base_url, token)) = self.get_auth().await {
             if let Err(e) = self.client.notify_stop(&base_url, &token).await {
                 warn!("notify_stop failed (ignored): {}", e);
@@ -424,6 +450,7 @@ impl WeChatBot {
         Ok(())
     }
 
+    /// Stop the bot.
     pub async fn stop(&self) {
         *self.stopped.write().await = true;
     }
@@ -453,12 +480,6 @@ impl WeChatBot {
                         "mid_size": result.encrypted_file_size,
                     }}));
                     let msg = protocol::build_media_message(user_id, context_token, items);
-                    // ---- 日志：发送消息 ----
-                    let log_path = get_desktop_log_path("rust.log");
-                    let _ = append_log(&log_path, &format!(
-                        "sendmessage payload (Image): {}",
-                        serde_json::to_string_pretty(&msg).unwrap()
-                    ));
                     self.client.send_message(&base_url, &token, &msg).await
                 }
                 SendContent::Video { data, caption } => {
@@ -474,12 +495,6 @@ impl WeChatBot {
                         "video_size": result.encrypted_file_size,
                     }}));
                     let msg = protocol::build_media_message(user_id, context_token, items);
-                    // ---- 日志：发送消息 ----
-                    let log_path = get_desktop_log_path("rust.log");
-                    let _ = append_log(&log_path, &format!(
-                        "sendmessage payload (Video): {}",
-                        serde_json::to_string_pretty(&msg).unwrap()
-                    ));
                     self.client.send_message(&base_url, &token, &msg).await
                 }
                 SendContent::File {
@@ -527,7 +542,6 @@ impl WeChatBot {
         })
     }
 
-    // --- 修改后的 cdn_upload（含详细日志）---
     async fn cdn_upload(
         &self,
         base_url: &str,
@@ -556,69 +570,39 @@ impl WeChatBot {
             aeskey: crypto::encode_aes_key_hex(&aes_key),
         };
 
-        // ---- 日志：getuploadurl 请求参数 ----
-        let log_path = get_desktop_log_path("rust.log");
-        let _ = append_log(&log_path, &format!(
-            "\n[CDN_UPLOAD] media_type={}\n  getuploadurl params: {:?}",
-            media_type,
-            serde_json::to_string(&params).unwrap_or_default()
-        ));
-
         let upload_resp = self.client.get_upload_url(base_url, token, &params).await?;
 
-        // ---- 日志：getuploadurl 响应 ----
-        let _ = append_log(&log_path, &format!(
-            "  getuploadurl response: upload_param={:?}, upload_full_url={:?}",
-            upload_resp.upload_param,
-            upload_resp.upload_full_url
-        ));
-
+        // 优先使用服务器返回的完整上传 URL（与 Node.js 对齐）
         let upload_url = if let Some(ref full_url) = upload_resp.upload_full_url {
             if !full_url.trim().is_empty() {
-                let _ = append_log(&log_path, &format!("  using upload_full_url: {}", full_url));
                 full_url.clone()
             } else {
+                // upload_full_url 为空字符串，回退到手动拼接
                 let upload_param = upload_resp.upload_param.ok_or_else(|| {
-                    WeChatBotError::Media("getuploadurl returned no upload_param".into())
+                    WeChatBotError::Media(
+                        "getuploadurl returned no valid upload URL (both upload_full_url and upload_param are empty)".into(),
+                    )
                 })?;
-                let url = protocol::build_cdn_upload_url(
-                    protocol::CDN_BASE_URL,
-                    &upload_param,
-                    &filekey,
-                );
-                let _ = append_log(&log_path, &format!("  fallback to built url: {}", url));
-                url
+                protocol::build_cdn_upload_url(protocol::CDN_BASE_URL, &upload_param, &filekey)
             }
         } else {
+            // 没有 upload_full_url，必须使用 upload_param
             let upload_param = upload_resp.upload_param.ok_or_else(|| {
-                WeChatBotError::Media("getuploadurl returned no upload_param".into())
+                WeChatBotError::Media(
+                    "getuploadurl did not return upload_full_url or upload_param".into(),
+                )
             })?;
-            let url = protocol::build_cdn_upload_url(
-                protocol::CDN_BASE_URL,
-                &upload_param,
-                &filekey,
-            );
-            let _ = append_log(&log_path, &format!("  no full_url, built url: {}", url));
-            url
+            protocol::build_cdn_upload_url(protocol::CDN_BASE_URL, &upload_param, &filekey)
         };
 
         let encrypted_file_size = ciphertext.len();
 
         let encrypt_query_param = self.client.upload_to_cdn(&upload_url, &ciphertext).await?;
 
-        // ---- 日志：上传结果 ----
-        let _ = append_log(&log_path, &format!(
-            "  CDN upload result: encrypt_query_param={}, encrypted_file_size={}",
-            encrypt_query_param,
-            encrypted_file_size
-        ));
-
-        let aes_key_b64 = crypto::encode_aes_key_base64(&aes_key);
-
         Ok(UploadResult {
             media: CDNMedia {
                 encrypt_query_param,
-                aes_key: aes_key_b64,
+                aes_key: crypto::encode_aes_key_base64(&aes_key),
                 encrypt_type: Some(1),
                 full_url: None,
             },
@@ -776,30 +760,11 @@ fn default_cred_path() -> String {
 }
 
 fn chrono_now() -> String {
+    // Simple ISO 8601 without chrono dependency
     let dur = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap();
     format!("{}Z", dur.as_secs())
-}
-
-// ── 日志辅助函数 ──
-
-fn get_desktop_log_path(filename: &str) -> PathBuf {
-    let home = if cfg!(windows) {
-        std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string())
-    } else {
-        std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
-    };
-    PathBuf::from(home).join("Desktop").join(filename)
-}
-
-fn append_log(path: &PathBuf, msg: &str) -> std::io::Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    writeln!(file, "{}", msg)?;
-    Ok(())
 }
 
 #[cfg(test)]
