@@ -44,9 +44,14 @@ jobs:
 
           Write-Host "📦 Beijing version: $major.$minor.$build.$revision"
 
-      # ---------- 编译 ----------
+      # ---------- 编译（优化体积）----------
       - name: Build n8n_bot
         run: cargo build --release --example n8n_bot
+        env:
+          CARGO_PROFILE_RELEASE_LTO: true          # 启用链接时优化，合并无用代码
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1    # 单代码生成单元，利于进一步优化
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: "s"       # 优化体积（替代默认的 3）
+          CARGO_PROFILE_RELEASE_STRIP: "symbols"     # 自动剥离调试符号（需 Rust 1.59+）
 
       # ---------- 生成 Release 标签（北京时间）----------
       - name: Generate tag and release name (Beijing time)
