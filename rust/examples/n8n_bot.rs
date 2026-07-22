@@ -1,5 +1,5 @@
 // examples/n8n_bot.rs
-// n8n Bot — Rust 版本6，连接 wechatbot 与 n8n webhook
+// n8n Bot — Rust 版本7，连接 wechatbot 与 n8n webhook
 // https://chat.deepseek.com/a/chat/s/3f0eb79e-7029-4877-9c95-90af65240239
 
 use std::env;
@@ -11,14 +11,66 @@ use tokio::io::AsyncWriteExt;
 use wechatbot::{
     BotOptions, ContentType, IncomingMessage, SendContent, WeChatBot,
 };
-use chrono::DateTime; // 新增：用于时间格式化
+use chrono::DateTime; // 用于时间格式化
 
-const N8N_WEBHOOK_URL: &str = "http://localhost:5678/webhook/wechat-bot";
-const N8N_TIMEOUT_MS: u64 = 120_000; // 2 分钟
+// Windows 控制台标题设置外部函数
+#[cfg(windows)]
+extern "system" {
+    fn SetConsoleTitleW(lpConsoleTitle: *const u16) -> i32;
+}
+
+fn set_console_title(title: &str) {
+    #[cfg(windows)]
+    {
+        let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe {
+            SetConsoleTitleW(wide.as_ptr());
+        }
+    }
+    // 非 Windows 系统不做操作
+}
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
+
+    // --- 解析命令行参数 ---
+    let args: Vec<String> = env::args().collect();
+    let mut webhook_url = "http://localhost:5678/webhook/wechat-bot".to_string();
+    let mut timeout_minutes: u64 = 5; // 默认 5 分钟
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-wh" => {
+                if i + 1 < args.len() {
+                    webhook_url = args[i + 1].clone();
+                    i += 1;
+                }
+            }
+            "-to" => {
+                if i + 1 < args.len() {
+                    if let Ok(minutes) = args[i + 1].parse::<u64>() {
+                        timeout_minutes = minutes;
+                    }
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let timeout_ms = timeout_minutes * 60 * 1000; // 转换为毫秒
+
+    // --- 设置控制台窗口标题 ---
+    let title_suffix = webhook_url
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(&webhook_url);
+    let title = format!("n8n_{}_{}", title_suffix, timeout_minutes);
+    set_console_title(&title);
 
     let bot = Arc::new(WeChatBot::new(BotOptions {
         on_qr_url: Some(Box::new(|url| {
@@ -33,12 +85,15 @@ async fn main() {
     let creds = bot.login(false).await.expect("登录失败");
     println!("Logged in: {} ({})", creds.account_id, creds.user_id);
 
+    // 将配置捕获到闭包中
     let bot_for_handler = Arc::clone(&bot);
+    let wh_url = webhook_url.clone();
     bot.on_message(Box::new(move |msg| {
         let bot = Arc::clone(&bot_for_handler);
         let msg = msg.clone();
+        let wh_url = wh_url.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_message(bot, msg).await {
+            if let Err(e) = handle_message(bot, msg, &wh_url, timeout_ms).await {
                 eprintln!("处理消息出错: {}", e);
             }
         });
@@ -52,6 +107,8 @@ async fn main() {
 async fn handle_message(
     bot: Arc<WeChatBot>,
     msg: IncomingMessage,
+    webhook_url: &str,
+    timeout_ms: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. 发送 "正在输入" 状态
     let _ = bot.send_typing(&msg.user_id).await;
@@ -141,9 +198,9 @@ async fn handle_message(
 
     let client = reqwest::Client::new();
     let response = client
-        .post(N8N_WEBHOOK_URL)
+        .post(webhook_url)   // 使用参数传入的 webhook_url
         .json(&payload)
-        .timeout(Duration::from_millis(N8N_TIMEOUT_MS))
+        .timeout(Duration::from_millis(timeout_ms))   // 使用参数传入的超时时间
         .send()
         .await?;
 
